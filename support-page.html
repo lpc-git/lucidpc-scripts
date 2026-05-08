@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LucidPC Remote Support</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: linear-gradient(135deg, #0d1b2a 0%, #1b263b 100%);
+      color: #f1f1f1;
+      min-height: 100vh;
+      margin: 0;
+      padding: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .container {
+      max-width: 640px;
+      width: 100%;
+      background: #16263a;
+      border-radius: 16px;
+      padding: 40px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+    }
+    h1 { color: #4dabf7; margin: 0 0 8px; font-size: 28px; }
+    .subtitle { color: #adb5bd; margin: 0 0 32px; font-size: 15px; }
+    .step {
+      display: flex;
+      align-items: flex-start;
+      gap: 16px;
+      padding: 20px;
+      margin-bottom: 16px;
+      background: #1b2c43;
+      border-radius: 12px;
+      border-left: 4px solid #4dabf7;
+    }
+    .step-number {
+      flex-shrink: 0;
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: #4dabf7;
+      color: #0d1b2a;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+    }
+    .step.done { border-left-color: #51cf66; }
+    .step.done .step-number { background: #51cf66; }
+    .step-content { flex: 1; }
+    .step h3 { margin: 0 0 8px; font-size: 17px; }
+    .step p { margin: 0 0 12px; color: #adb5bd; font-size: 14px; line-height: 1.5; }
+    button, .btn {
+      display: inline-block;
+      background: #4dabf7;
+      color: #0d1b2a;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 8px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      transition: all 0.15s;
+    }
+    button:hover, .btn:hover { background: #339af0; transform: translateY(-1px); }
+    button.copied { background: #51cf66; }
+    .footer-note {
+      margin-top: 24px;
+      padding-top: 24px;
+      border-top: 1px solid #2c3e50;
+      color: #6c7989;
+      font-size: 13px;
+      text-align: center;
+    }
+    code {
+      background: #0d1b2a;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: "SF Mono", Monaco, Consolas, monospace;
+      font-size: 13px;
+      color: #ffd43b;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>LucidPC Remote Support</h1>
+    <p class="subtitle">Three steps to let your support technician connect to your computer.</p>
+
+    <div class="step" id="step1">
+      <div class="step-number">1</div>
+      <div class="step-content">
+        <h3>Download &amp; install RustDesk</h3>
+        <p>Click below to download the official RustDesk app. Run the installer when it finishes.</p>
+        <a class="btn" href="https://rustdesk.com/download" target="_blank" rel="noopener">Download RustDesk</a>
+      </div>
+    </div>
+
+    <div class="step" id="step2">
+      <div class="step-number">2</div>
+      <div class="step-content">
+        <h3>Copy the support code</h3>
+        <p>Click the button to copy your support code to the clipboard.</p>
+        <button id="copyBtn" type="button">Copy Support Code</button>
+      </div>
+    </div>
+
+    <div class="step" id="step3">
+      <div class="step-number">3</div>
+      <div class="step-content">
+        <h3>Import the code into RustDesk</h3>
+        <p>Open RustDesk. Click the <strong>three dots <code>⋮</code></strong> next to your ID at the top, choose <strong>Network</strong>, then click <strong>Import</strong>. Click <strong>OK</strong> to save.</p>
+        <p>Tell your support technician the <strong>9-digit ID</strong> and <strong>password</strong> shown by RustDesk. That's it!</p>
+      </div>
+    </div>
+
+    <div class="footer-note">
+      Your screen is never shared until you give your technician the ID and password from RustDesk.
+    </div>
+  </div>
+
+  <script>
+    // RustDesk export-string format: reverse(base64(JSON config))
+    // Generated for LucidPC support servers.
+    const SUPPORT_CODE = "=0nI9sWO0VGRVBDUBFVRZxUOzImYsFEUBJFdzYmb1E1dVFVezp1KEJjMttWYShmI6ISeltmIsISbvNmLjBHZpNWds5SZ2lGbv8iOzBHd0hmI6ISawFmIsISbvNmLjBHZpNWds5SZ2lGbiojI5FGblJnIsISbvNmLjBHZpNWds5SZ2lGbiojI0N3boJye";
+
+    const btn = document.getElementById('copyBtn');
+    const step2 = document.getElementById('step2');
+
+    btn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(SUPPORT_CODE);
+        btn.textContent = 'Copied! ✓';
+        btn.classList.add('copied');
+        step2.classList.add('done');
+        setTimeout(() => {
+          btn.textContent = 'Copy Support Code';
+          btn.classList.remove('copied');
+        }, 4000);
+      } catch (err) {
+        // Fallback: select-all and prompt
+        const ta = document.createElement('textarea');
+        ta.value = SUPPORT_CODE;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand('copy');
+          btn.textContent = 'Copied! ✓';
+          btn.classList.add('copied');
+          step2.classList.add('done');
+        } catch (e2) {
+          alert('Could not copy automatically. Please copy this manually:\n\n' + SUPPORT_CODE);
+        }
+        document.body.removeChild(ta);
+      }
+    });
+  </script>
+</body>
+</html>
