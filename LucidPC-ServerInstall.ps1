@@ -204,6 +204,19 @@ if (-not $svc) {
         -Force | Out-Null
     Write-Verbose "Watchdog task '$watchdogName' registered (handles both stopped AND deleted service)"
 
+    # Self-verify all three recovery layers are actually in place
+    $script:recoveryStatus = @{
+        AutoStart  = $false
+        Recovery   = $false
+        Watchdog   = $false
+    }
+    $svcCheck = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+    if ($svcCheck -and $svcCheck.StartType -eq 'Automatic') { $script:recoveryStatus.AutoStart = $true }
+    $failureOut = & sc.exe qfailure RustDesk 2>&1 | Out-String
+    if ($failureOut -match 'RESTART') { $script:recoveryStatus.Recovery = $true }
+    if (Get-ScheduledTask -TaskName $watchdogName -ErrorAction SilentlyContinue) { $script:recoveryStatus.Watchdog = $true }
+    Write-Verbose ("Recovery verify: AutoStart={0} Recovery={1} Watchdog={2}" -f $script:recoveryStatus.AutoStart, $script:recoveryStatus.Recovery, $script:recoveryStatus.Watchdog)
+
     Show-StepOk
 
     # Step 4: Set permanent password as SYSTEM (one-shot scheduled task)
@@ -283,6 +296,29 @@ if (-not $svc) {
         Write-Host ""
         Write-Host "  Password (save now -- shown only once):" -ForegroundColor Yellow
         Write-Host "    $PermanentPassword" -ForegroundColor Yellow
+    }
+    Write-Host ""
+
+    # Show recovery layer status (verified above)
+    Write-Host "  Auto-recovery active:"
+    $allOk = $true
+    foreach ($pair in @(
+        @{ Label = 'Service auto-start on Windows boot      '; Ok = $script:recoveryStatus.AutoStart },
+        @{ Label = 'Service Recovery (auto-restart on crash)'; Ok = $script:recoveryStatus.Recovery },
+        @{ Label = 'Watchdog task (every 5 min as SYSTEM)   '; Ok = $script:recoveryStatus.Watchdog }
+    )) {
+        if ($pair.Ok) {
+            Write-Host "    [OK]  $($pair.Label)" -ForegroundColor Green
+        } else {
+            Write-Host "    [!!]  $($pair.Label)  -- not verified, see -Verbose for details" -ForegroundColor Yellow
+            $allOk = $false
+        }
+    }
+    if (-not $allOk) {
+        Write-Host ""
+        Write-Host "  One or more recovery layers did not verify. Server is still accessible," -ForegroundColor Yellow
+        Write-Host "  but if RustDesk gets stopped you may need to manually intervene." -ForegroundColor Yellow
+        Write-Host "  Re-run with -Verbose to see what failed." -ForegroundColor Yellow
     }
     Write-Host ""
 

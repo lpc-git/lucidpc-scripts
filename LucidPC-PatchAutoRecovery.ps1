@@ -81,15 +81,32 @@ if (-not $svc) {
         -Force | Out-Null
     Write-Host " done" -ForegroundColor Green
 
+    # Self-verify all three layers are actually in place
     Write-Host ""
-    Write-Host "  Auto-recovery is now active on this server." -ForegroundColor Green
+    Write-Host "  Verifying:"
+    $allOk = $true
+
+    $svcCheck = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+    if ($svcCheck -and $svcCheck.StartType -eq 'Automatic') {
+        Write-Host "    [OK]  Service auto-start on Windows boot" -ForegroundColor Green
+    } else { Write-Host "    [!!]  Service auto-start NOT verified" -ForegroundColor Red; $allOk = $false }
+
+    $failureOut = & sc.exe qfailure RustDesk 2>&1 | Out-String
+    if ($failureOut -match 'RESTART') {
+        Write-Host "    [OK]  Service Recovery (auto-restart on crash)" -ForegroundColor Green
+    } else { Write-Host "    [!!]  Service Recovery NOT verified" -ForegroundColor Red; $allOk = $false }
+
+    if (Get-ScheduledTask -TaskName $watchdogName -ErrorAction SilentlyContinue) {
+        Write-Host "    [OK]  Watchdog task (every 5 min as SYSTEM)" -ForegroundColor Green
+    } else { Write-Host "    [!!]  Watchdog task NOT verified" -ForegroundColor Red; $allOk = $false }
+
     Write-Host ""
-    Write-Host "  Recovery covers all three failure modes:"
-    Write-Host "    1. Service crash             -> auto-restart by Windows Service Recovery (5s)"
-    Write-Host "    2. Service stopped manually  -> watchdog Start-Service (within 5 min)"
-    Write-Host "    3. Service DELETED by GUI    -> watchdog re-runs --install-service (within 5 min)"
-    Write-Host ""
-    Write-Host "  In all cases: max 5 minutes of access loss, then automatic recovery." -ForegroundColor DarkGray
+    if ($allOk) {
+        Write-Host "  Auto-recovery is fully active. Worst-case access loss = 5 minutes." -ForegroundColor Green
+    } else {
+        Write-Host "  Some layers did not verify. Server is still accessible right now," -ForegroundColor Yellow
+        Write-Host "  but recovery may not work if the service is stopped. Re-run this script." -ForegroundColor Yellow
+    }
     Write-Host ""
 
 } catch {
