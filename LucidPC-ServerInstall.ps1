@@ -106,9 +106,30 @@ try {
         Invoke-WebRequest -Uri $RustDeskUrl -OutFile $installer -UseBasicParsing
         Write-Ok "Downloaded to $installer"
 
-        Write-Step "Installing RustDesk silently as a service..."
-        $proc = Start-Process -FilePath $installer -ArgumentList '--silent-install' -Wait -PassThru
-        if ($proc.ExitCode -ne 0) { throw "Installer exited with code $($proc.ExitCode)" }
+        Write-Step "Installing RustDesk silently (will poll for completion, ~30-60s)..."
+        # Don't use -Wait: RustDesk's --silent-install often auto-launches the UI after installing,
+        # and that holds the installer's parent process open indefinitely. Instead, fire-and-forget
+        # the installer and poll for the binary to appear at the install location.
+        $proc = Start-Process -FilePath $installer -ArgumentList '--silent-install' -PassThru
+        $timeoutSec = 180
+        $waited = 0
+        while (-not (Test-Path "$env:ProgramFiles\RustDesk\rustdesk.exe") -and $waited -lt $timeoutSec) {
+            Start-Sleep -Seconds 2
+            $waited += 2
+        }
+        if (-not (Test-Path "$env:ProgramFiles\RustDesk\rustdesk.exe")) {
+            throw "Install timed out after $timeoutSec seconds. Run the installer manually and re-run this script."
+        }
+
+        # Give the service registration a moment to finalize
+        Start-Sleep -Seconds 5
+
+        # Kill any RustDesk UI/processes that auto-launched - they can keep the installer parent alive
+        # and we want a clean state before writing config and setting password.
+        Get-Process -Name 'rustdesk', 'RustDesk' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        if ($proc -and -not $proc.HasExited) {
+            $proc | Stop-Process -Force -ErrorAction SilentlyContinue
+        }
 
         $rustdeskExe = $rustdeskExePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
         if (-not $rustdeskExe) { throw "Could not find rustdesk.exe after install." }
