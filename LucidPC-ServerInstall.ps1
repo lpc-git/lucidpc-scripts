@@ -388,8 +388,12 @@ if (-not $svc) {
 } catch {
     Show-Error $_.Exception.Message
     Write-Verbose $_.ScriptStackTrace
-    Read-Host "`n  Press Enter to exit"
+    Write-Host ""
+    Write-Host "  Press any key to exit..." -NoNewline -ForegroundColor DarkGray
+    $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
     exit 1
 }
 
-Read-Host "  Press Enter to close window"
+Write-Host "  Press any key to close..." -NoNewline -ForegroundColor DarkGray
+$null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+exit 0
