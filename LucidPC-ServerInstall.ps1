@@ -203,9 +203,15 @@ verification-method = 'use-permanent-password'
     #   (b) service entry deleted entirely (RustDesk's "Stop Service" button calls
     #       `sc delete RustDesk` -- the service literally vanishes from Windows)
     #       In this case we need to RE-INSTALL the service via `rustdesk.exe --install-service`
-    # Runs every 5 min as SYSTEM so it has admin/SCM privileges without any UAC prompt.
+    # Runs every 5 min as SYSTEM. We use schtasks.exe (legacy, universally reliable on
+    # all Windows versions including Windows Server) instead of New-ScheduledTask cmdlets
+    # which have flaky Register/Get visibility especially on Server SKUs.
     $watchdogName = 'LucidPC-RustDesk-Watchdog'
-    Unregister-ScheduledTask -TaskName $watchdogName -Confirm:$false -ErrorAction SilentlyContinue
+    $watchdogDir = Join-Path $env:ProgramData 'LucidPC'
+    $watchdogPath = Join-Path $watchdogDir 'rustdesk-watchdog.ps1'
+
+    # 1. Write the watchdog logic to disk (file-based; task references this file)
+    New-Item -ItemType Directory -Force -Path $watchdogDir | Out-Null
     $watchdogScript = @'
 $rdExe = @("$env:ProgramFiles\RustDesk\rustdesk.exe", "$env:ProgramFiles\RustDesk\RustDesk.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $rdExe) { exit 0 }
@@ -219,34 +225,22 @@ if (-not $svc) {
     Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
 }
 '@
-    $watchdogB64 = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($watchdogScript))
-    $wdAction = New-ScheduledTaskAction -Execute 'powershell.exe' `
-        -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $watchdogB64"
-    $wdTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
-        -RepetitionInterval (New-TimeSpan -Minutes 5)
-    $wdPrincipal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -RunLevel Highest -LogonType ServiceAccount
-    $wdSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-        -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-    # Register watchdog with retry-and-verify -- Register-ScheduledTask sometimes returns
-    # before the task is queryable via Get-ScheduledTask, especially on Windows Server.
-    $watchdogRegistered = $false
-    for ($wdAttempt = 1; $wdAttempt -le 3 -and -not $watchdogRegistered; $wdAttempt++) {
-        try {
-            Register-ScheduledTask -TaskName $watchdogName -Action $wdAction -Trigger $wdTrigger `
-                -Principal $wdPrincipal -Settings $wdSettings `
-                -Description 'LucidPC: every 5 min, ensure RustDesk service exists and is Running. Re-installs via --install-service if Stop Service button deleted the service entry.' `
-                -Force -ErrorAction Stop | Out-Null
-        } catch {
-            Write-Verbose "Watchdog Register attempt $wdAttempt failed: $($_.Exception.Message)"
-        }
-        Start-Sleep -Milliseconds 800
-        if (Get-ScheduledTask -TaskName $watchdogName -ErrorAction SilentlyContinue) {
-            $watchdogRegistered = $true
-            Write-Verbose "Watchdog task '$watchdogName' verified registered (attempt $wdAttempt)"
-        } else {
-            Write-Verbose "Watchdog not yet visible after attempt $wdAttempt; retrying"
-            Start-Sleep -Seconds 1
-        }
+    Set-Content -Path $watchdogPath -Value $watchdogScript -Encoding ASCII -Force
+
+    # 2. Delete any prior task with this name (idempotent; ignores "doesn't exist")
+    & schtasks.exe /Delete /TN $watchdogName /F *>$null
+
+    # 3. Register the watchdog task via schtasks.exe -- runs every 5 min as SYSTEM
+    $taskCommand = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$watchdogPath`""
+    $schOutput = & schtasks.exe /Create /TN $watchdogName /TR $taskCommand /SC MINUTE /MO 5 /RU SYSTEM /RL HIGHEST /F 2>&1
+    $schExit = $LASTEXITCODE
+    Write-Verbose "schtasks /Create exit=$schExit output: $schOutput"
+
+    # 4. Verify the task exists
+    & schtasks.exe /Query /TN $watchdogName *>$null
+    $watchdogRegistered = ($LASTEXITCODE -eq 0)
+    if (-not $watchdogRegistered) {
+        Write-Verbose "Watchdog NOT visible via schtasks /Query after Create. Output was: $schOutput"
     }
 
     # Self-verify all three recovery layers are actually in place
