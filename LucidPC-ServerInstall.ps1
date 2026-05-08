@@ -1,19 +1,28 @@
 # LucidPC RustDesk Setup -- unattended-access install for Windows
 #
-# Run as Administrator. After it finishes, you can connect to this device from your
-# LucidPC tech client using the 9-digit Device ID and the password you set.
+# Idempotent. Safe to run on:
+#   - A fresh server (full install + config + password + auto-recovery)
+#   - An existing server that needs auto-recovery added (skips already-done steps)
+#   - Any server you just want to re-verify is correctly set up
+#
+# Run as Administrator.
 #
 # Usage:
+#   iex (irm https://raw.githubusercontent.com/lpc-git/lucidpc-scripts/main/bootstrap-server.ps1)
+# Or:
 #   powershell -ExecutionPolicy Bypass -File .\LucidPC-ServerInstall.ps1
-# Or double-click LucidPC-ServerInstall.bat (self-elevates and prompts for password).
 #
-# For diagnostic output:
-#   powershell -ExecutionPolicy Bypass -File .\LucidPC-ServerInstall.ps1 -Verbose
+# Re-run flags:
+#   -ForcePassword     Re-prompt and re-set the permanent password even if already set
+#   -SkipPassword      Skip the password step entirely (only refreshes config + recovery)
+#   -Verbose           Show diagnostic output for troubleshooting
 
 [CmdletBinding()]
 param(
     [string]$PermanentPassword = '',
     [switch]$GeneratePassword,
+    [switch]$ForcePassword,
+    [switch]$SkipPassword,
     [int]$GeneratedLength = 20,
     [string]$RustDeskUrl = 'https://github.com/rustdesk/rustdesk/releases/latest/download/rustdesk-1.4.6-x86_64.exe'
 )
@@ -55,34 +64,54 @@ if (-not $isAdmin) {
     exit 1
 }
 
-# --- Resolve permanent password (silent on success) ---
+# --- Decide whether the password step is even needed ---
+# Skip the password prompt entirely if:
+#   - User passed -SkipPassword, OR
+#   - The SYSTEM-profile RustDesk.toml already has a 'password = ...' entry
+#     AND user did NOT pass -ForcePassword (so re-runs don't unnecessarily re-prompt)
+$sysCfgFile = 'C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml'
+$pwAlreadySet = $false
+if (Test-Path $sysCfgFile) {
+    $existingToml = Get-Content $sysCfgFile -Raw -ErrorAction SilentlyContinue
+    if ($existingToml -match "password\s*=\s*'[^']+'") { $pwAlreadySet = $true }
+}
+$skipPasswordStep = $SkipPassword.IsPresent -or ($pwAlreadySet -and -not $ForcePassword.IsPresent -and -not $GeneratePassword.IsPresent -and [string]::IsNullOrWhiteSpace($PermanentPassword))
+Write-Verbose "Password step: pwAlreadySet=$pwAlreadySet skipPasswordStep=$skipPasswordStep"
+
+# --- Resolve permanent password if step not skipped ---
 $pwWasGenerated = $false
-if ($GeneratePassword) {
-    $PermanentPassword = New-RandomPassword -Length $GeneratedLength
-    $pwWasGenerated = $true
-    Write-Verbose "Generated random $GeneratedLength-char password"
-} elseif ([string]::IsNullOrWhiteSpace($PermanentPassword)) {
-    Clear-Host
-    Write-Host ""
-    Write-Host "  LucidPC RustDesk Setup" -ForegroundColor White
-    Write-Host "  ======================" -ForegroundColor White
-    Write-Host ""
-    Write-Host "  Paste the LucidPC support password (input is hidden)." -ForegroundColor DarkGray
-    Write-Host ""
-    $secure1 = Read-Host "  Password" -AsSecureString
-    if (-not $secure1 -or $secure1.Length -eq 0) { Show-Error "Password required."; exit 1 }
-    $secure2 = Read-Host "  Confirm "  -AsSecureString
-    $bstr1 = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure1)
-    $bstr2 = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure2)
-    try {
-        $pw1 = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr1)
-        $pw2 = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr2)
-        if ($pw1 -ne $pw2) { Show-Error "Passwords did not match."; exit 1 }
-        if ($pw1.Length -lt 8) { Show-Error "Password must be at least 8 characters."; exit 1 }
-        $PermanentPassword = $pw1
-    } finally {
-        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr1)
-        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr2)
+if (-not $skipPasswordStep) {
+    if ($GeneratePassword) {
+        $PermanentPassword = New-RandomPassword -Length $GeneratedLength
+        $pwWasGenerated = $true
+        Write-Verbose "Generated random $GeneratedLength-char password"
+    } elseif ([string]::IsNullOrWhiteSpace($PermanentPassword)) {
+        Clear-Host
+        Write-Host ""
+        Write-Host "  LucidPC RustDesk Setup" -ForegroundColor White
+        Write-Host "  ======================" -ForegroundColor White
+        Write-Host ""
+        if ($pwAlreadySet -and $ForcePassword) {
+            Write-Host "  Permanent password is already set; -ForcePassword passed, re-prompting." -ForegroundColor DarkGray
+        } else {
+            Write-Host "  Paste the LucidPC support password (input is hidden)." -ForegroundColor DarkGray
+        }
+        Write-Host ""
+        $secure1 = Read-Host "  Password" -AsSecureString
+        if (-not $secure1 -or $secure1.Length -eq 0) { Show-Error "Password required."; exit 1 }
+        $secure2 = Read-Host "  Confirm "  -AsSecureString
+        $bstr1 = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure1)
+        $bstr2 = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure2)
+        try {
+            $pw1 = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr1)
+            $pw2 = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr2)
+            if ($pw1 -ne $pw2) { Show-Error "Passwords did not match."; exit 1 }
+            if ($pw1.Length -lt 8) { Show-Error "Password must be at least 8 characters."; exit 1 }
+            $PermanentPassword = $pw1
+        } finally {
+            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr1)
+            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr2)
+        }
     }
 }
 
@@ -219,7 +248,11 @@ if (-not $svc) {
 
     Show-StepOk
 
-    # Step 4: Set permanent password as SYSTEM (one-shot scheduled task)
+    # Step 4: Set permanent password as SYSTEM (one-shot scheduled task) -- skipped on re-run
+    if ($skipPasswordStep) {
+        Show-Step 4 5 "Permanent password (already set, skipping)..."
+        Show-StepOk
+    } else {
     Show-Step 4 5 "Setting permanent password..."
     $taskName = "lucidpc-pw-$(([guid]::NewGuid()).ToString('N').Substring(0,8))"
     $passwordSet = $false
@@ -260,6 +293,7 @@ if (-not $svc) {
         Show-Step 4 5 "Setting permanent password..." # rewrite line in case of partial output
         Show-StepFail "Could not confirm password was set; check Settings -> Security -> Password for unattended access"
     }
+    }  # end if (-not $skipPasswordStep)
 
     # Step 5: Get device ID
     Show-Step 5 5 "Reading Device ID..."
