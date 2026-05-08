@@ -165,27 +165,44 @@ verification-method = 'use-permanent-password'
     }
 
     # Configure Windows Service Recovery: restart on crash with 5s delay (3 attempts).
-    # This handles the "service crashes mid-session" case so we don't lose remote access.
+    # This handles the "service crashes mid-session" case (when service still exists).
     & sc.exe failure RustDesk reset= 86400 actions= restart/5000/restart/5000/restart/5000 | Out-Null
     Write-Verbose "Service failure recovery: restart on crash, 3 attempts, 5s delay"
 
-    # Watchdog: scheduled task that runs every 5 min and ensures the service is Running.
-    # Catches the case where someone (or something) explicitly stopped the service.
-    # Runs as SYSTEM so it can start the service without UAC.
+    # Watchdog scheduled task -- handles BOTH failure modes:
+    #   (a) service exists but Status=Stopped -> Start-Service
+    #   (b) service entry deleted entirely (RustDesk's "Stop Service" button calls
+    #       `sc delete RustDesk` -- the service literally vanishes from Windows)
+    #       In this case we need to RE-INSTALL the service via `rustdesk.exe --install-service`
+    # Runs every 5 min as SYSTEM so it has admin/SCM privileges without any UAC prompt.
     $watchdogName = 'LucidPC-RustDesk-Watchdog'
     Unregister-ScheduledTask -TaskName $watchdogName -Confirm:$false -ErrorAction SilentlyContinue
+    $watchdogScript = @'
+$rdExe = @("$env:ProgramFiles\RustDesk\rustdesk.exe", "$env:ProgramFiles\RustDesk\RustDesk.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $rdExe) { exit 0 }
+$svc = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+if (-not $svc) {
+    & $rdExe --install-service
+    Start-Sleep -Seconds 3
+    Set-Service -Name 'RustDesk' -StartupType Automatic -ErrorAction SilentlyContinue
+    Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+} elseif ($svc.Status -ne 'Running') {
+    Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+}
+'@
+    $watchdogB64 = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($watchdogScript))
     $wdAction = New-ScheduledTaskAction -Execute 'powershell.exe' `
-        -Argument '-NoProfile -WindowStyle Hidden -Command "if ((Get-Service -Name RustDesk -ErrorAction SilentlyContinue).Status -ne ''Running'') { Start-Service -Name RustDesk -ErrorAction SilentlyContinue }"'
+        -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $watchdogB64"
     $wdTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
         -RepetitionInterval (New-TimeSpan -Minutes 5)
     $wdPrincipal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -RunLevel Highest -LogonType ServiceAccount
     $wdSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-        -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
     Register-ScheduledTask -TaskName $watchdogName -Action $wdAction -Trigger $wdTrigger `
         -Principal $wdPrincipal -Settings $wdSettings `
-        -Description 'LucidPC: ensures the RustDesk service is running every 5 minutes (recovery if stopped/crashed)' `
+        -Description 'LucidPC: every 5 min, ensure RustDesk service exists and is Running. Re-installs via --install-service if Stop Service button deleted the service entry.' `
         -Force | Out-Null
-    Write-Verbose "Watchdog task '$watchdogName' registered (runs every 5 minutes as SYSTEM)"
+    Write-Verbose "Watchdog task '$watchdogName' registered (handles both stopped AND deleted service)"
 
     Show-StepOk
 
