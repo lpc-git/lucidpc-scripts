@@ -1,0 +1,13 @@
+# Shell scripts MUST have LF line endings or Linux can't run them
+# (otherwise: /usr/bin/env: 'bash\r': No such file or directory)
+*.sh    text eol=lf
+*.bash  text eol=lf
+
+# Windows scripts: CRLF is fine
+*.bat   text eol=crlf
+*.ps1   text eol=crlf
+*.cmd   text eol=crlf
+
+# Markdown / docs: LF is fine on both
+*.md    text eol=lf
+*.html  text eol=lf
