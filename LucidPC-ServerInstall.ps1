@@ -163,6 +163,30 @@ verification-method = 'use-permanent-password'
         Show-StepFail "Service didn't start (status: $($svc.Status))"
         throw "Service not running"
     }
+
+    # Configure Windows Service Recovery: restart on crash with 5s delay (3 attempts).
+    # This handles the "service crashes mid-session" case so we don't lose remote access.
+    & sc.exe failure RustDesk reset= 86400 actions= restart/5000/restart/5000/restart/5000 | Out-Null
+    Write-Verbose "Service failure recovery: restart on crash, 3 attempts, 5s delay"
+
+    # Watchdog: scheduled task that runs every 5 min and ensures the service is Running.
+    # Catches the case where someone (or something) explicitly stopped the service.
+    # Runs as SYSTEM so it can start the service without UAC.
+    $watchdogName = 'LucidPC-RustDesk-Watchdog'
+    Unregister-ScheduledTask -TaskName $watchdogName -Confirm:$false -ErrorAction SilentlyContinue
+    $wdAction = New-ScheduledTaskAction -Execute 'powershell.exe' `
+        -Argument '-NoProfile -WindowStyle Hidden -Command "if ((Get-Service -Name RustDesk -ErrorAction SilentlyContinue).Status -ne ''Running'') { Start-Service -Name RustDesk -ErrorAction SilentlyContinue }"'
+    $wdTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+        -RepetitionInterval (New-TimeSpan -Minutes 5)
+    $wdPrincipal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -RunLevel Highest -LogonType ServiceAccount
+    $wdSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    Register-ScheduledTask -TaskName $watchdogName -Action $wdAction -Trigger $wdTrigger `
+        -Principal $wdPrincipal -Settings $wdSettings `
+        -Description 'LucidPC: ensures the RustDesk service is running every 5 minutes (recovery if stopped/crashed)' `
+        -Force | Out-Null
+    Write-Verbose "Watchdog task '$watchdogName' registered (runs every 5 minutes as SYSTEM)"
+
     Show-StepOk
 
     # Step 4: Set permanent password as SYSTEM (one-shot scheduled task)
