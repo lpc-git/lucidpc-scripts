@@ -328,8 +328,11 @@ if (-not $svc) {
         $match = [regex]::Match($deviceIdRaw, '\b\d{6,12}\b')
         if ($match.Success) { $deviceId = $match.Value; break }
     }
-    Start-Process -FilePath $rustdeskExe -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 3
+    # NOTE: deliberately NOT launching the RustDesk UI at the end of install --
+    # the window steals keyboard focus from the cmd console and breaks the
+    # "Press any key to close" prompt for several minutes. The service is already
+    # running (device is registered with hbbs), and the Device ID is shown in
+    # the output + clipboard + Desktop file -- no UI launch needed.
     if ($deviceId) {
         try { Set-Clipboard -Value $deviceId } catch { }
         Show-StepOk
