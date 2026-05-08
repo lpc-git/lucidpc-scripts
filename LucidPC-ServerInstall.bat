@@ -28,4 +28,3 @@ if not exist "%SCRIPT%" (
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT%"
 
 endlocal
-pause

@@ -227,23 +227,38 @@ if (-not $svc) {
     $wdPrincipal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -RunLevel Highest -LogonType ServiceAccount
     $wdSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-    Register-ScheduledTask -TaskName $watchdogName -Action $wdAction -Trigger $wdTrigger `
-        -Principal $wdPrincipal -Settings $wdSettings `
-        -Description 'LucidPC: every 5 min, ensure RustDesk service exists and is Running. Re-installs via --install-service if Stop Service button deleted the service entry.' `
-        -Force | Out-Null
-    Write-Verbose "Watchdog task '$watchdogName' registered (handles both stopped AND deleted service)"
+    # Register watchdog with retry-and-verify -- Register-ScheduledTask sometimes returns
+    # before the task is queryable via Get-ScheduledTask, especially on Windows Server.
+    $watchdogRegistered = $false
+    for ($wdAttempt = 1; $wdAttempt -le 3 -and -not $watchdogRegistered; $wdAttempt++) {
+        try {
+            Register-ScheduledTask -TaskName $watchdogName -Action $wdAction -Trigger $wdTrigger `
+                -Principal $wdPrincipal -Settings $wdSettings `
+                -Description 'LucidPC: every 5 min, ensure RustDesk service exists and is Running. Re-installs via --install-service if Stop Service button deleted the service entry.' `
+                -Force -ErrorAction Stop | Out-Null
+        } catch {
+            Write-Verbose "Watchdog Register attempt $wdAttempt failed: $($_.Exception.Message)"
+        }
+        Start-Sleep -Milliseconds 800
+        if (Get-ScheduledTask -TaskName $watchdogName -ErrorAction SilentlyContinue) {
+            $watchdogRegistered = $true
+            Write-Verbose "Watchdog task '$watchdogName' verified registered (attempt $wdAttempt)"
+        } else {
+            Write-Verbose "Watchdog not yet visible after attempt $wdAttempt; retrying"
+            Start-Sleep -Seconds 1
+        }
+    }
 
     # Self-verify all three recovery layers are actually in place
     $script:recoveryStatus = @{
         AutoStart  = $false
         Recovery   = $false
-        Watchdog   = $false
+        Watchdog   = $watchdogRegistered
     }
     $svcCheck = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
     if ($svcCheck -and $svcCheck.StartType -eq 'Automatic') { $script:recoveryStatus.AutoStart = $true }
     $failureOut = & sc.exe qfailure RustDesk 2>&1 | Out-String
     if ($failureOut -match 'RESTART') { $script:recoveryStatus.Recovery = $true }
-    if (Get-ScheduledTask -TaskName $watchdogName -ErrorAction SilentlyContinue) { $script:recoveryStatus.Watchdog = $true }
     Write-Verbose ("Recovery verify: AutoStart={0} Recovery={1} Watchdog={2}" -f $script:recoveryStatus.AutoStart, $script:recoveryStatus.Recovery, $script:recoveryStatus.Watchdog)
 
     Show-StepOk
@@ -263,11 +278,11 @@ if (-not $svc) {
         Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
         Start-ScheduledTask -TaskName $taskName
         $waited = 0
-        while ((Get-ScheduledTask -TaskName $taskName).State -ne 'Ready' -and $waited -lt 15) {
+        while ((Get-ScheduledTask -TaskName $taskName).State -ne 'Ready' -and $waited -lt 30) {
             Start-Sleep -Seconds 1; $waited++
         }
         $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName
-        Write-Verbose "Scheduled task LastTaskResult: $($taskInfo.LastTaskResult)"
+        Write-Verbose "Scheduled task LastTaskResult: $($taskInfo.LastTaskResult) (waited ${waited}s)"
         if ($taskInfo.LastTaskResult -eq 0) { $passwordSet = $true }
     } catch {
         Write-Verbose "Scheduled task method failed: $($_.Exception.Message)"
@@ -279,18 +294,33 @@ if (-not $svc) {
     Stop-Service -Name 'RustDesk' -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
     Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 6   # service needs time to receive IPC + write the toml back
 
-    # Verify by checking the SYSTEM-profile config has the password field
-    $sysCfgFile = 'C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml'
+    # Verify the password landed somewhere -- check ALL plausible config locations,
+    # and retry a few times because the SYSTEM service writes asynchronously after IPC.
+    $candidatePaths = @(
+        'C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config\RustDesk.toml',
+        'C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml',
+        (Join-Path $env:APPDATA 'RustDesk\config\RustDesk.toml')
+    )
     $verified = $false
-    if (Test-Path $sysCfgFile) {
-        $tomlContent = Get-Content $sysCfgFile -Raw -ErrorAction SilentlyContinue
-        if ($tomlContent -match "password\s*=\s*'[^']+'") { $verified = $true }
+    for ($vAttempt = 1; $vAttempt -le 5 -and -not $verified; $vAttempt++) {
+        foreach ($p in $candidatePaths) {
+            if (Test-Path $p) {
+                $tomlContent = Get-Content $p -Raw -ErrorAction SilentlyContinue
+                if ($tomlContent -match "password\s*=\s*'[^']+'") {
+                    $verified = $true
+                    Write-Verbose "Password verified in $p (attempt $vAttempt)"
+                    break
+                }
+            }
+        }
+        if (-not $verified) { Start-Sleep -Seconds 2 }
     }
-    Write-Verbose "Password verification (config file has password field): $verified"
-    if ($passwordSet -or $verified) { Show-StepOk } else {
-        Show-Step 4 5 "Setting permanent password..." # rewrite line in case of partial output
+
+    if ($passwordSet -or $verified) {
+        Show-StepOk
+    } else {
         Show-StepFail "Could not confirm password was set; check Settings -> Security -> Password for unattended access"
     }
     }  # end if (-not $skipPasswordStep)
@@ -368,4 +398,4 @@ if (-not $svc) {
     exit 1
 }
 
-Read-Host "  Press Enter to close"
+Read-Host "  Press Enter to close window"
