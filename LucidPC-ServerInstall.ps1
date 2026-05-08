@@ -240,14 +240,52 @@ verification-method = 'use-permanent-password'
         Write-Host "    The service may not have written it yet -- give it a minute, then verify in RustDesk Settings." -ForegroundColor Yellow
     }
 
-    # 6. Read back the device's RustDesk ID
+    # 8. Verify the RustDesk service is actually Running
+    Write-Step "Verifying RustDesk service is running..."
+    $svc = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+    if (-not $svc) {
+        Write-Err "RustDesk service is not registered. Install may be incomplete."
+        throw "Service missing"
+    }
+    $tries = 0
+    while ($svc.Status -ne 'Running' -and $tries -lt 6) {
+        Start-Sleep -Seconds 2
+        $svc.Refresh()
+        $tries++
+    }
+    if ($svc.Status -eq 'Running') {
+        Write-Ok "RustDesk service is Running (auto-start enabled)"
+    } else {
+        Write-Err "RustDesk service did not reach Running state. Last status: $($svc.Status)"
+        throw "Service not running"
+    }
+
+    # 9. Read the device's RustDesk ID with retry (service IPC needs a moment to be ready)
     Write-Step "Retrieving this device's RustDesk ID..."
-    Start-Sleep -Seconds 4
-    $deviceIdRaw = & $rustdeskExe --get-id 2>&1
     $deviceId = $null
-    if ($deviceIdRaw) {
-        $match = $deviceIdRaw | Select-String -Pattern '^\d{6,12}$' | Select-Object -First 1
-        if ($match) { $deviceId = $match.ToString().Trim() }
+    for ($attempt = 1; $attempt -le 6; $attempt++) {
+        Start-Sleep -Seconds 2
+        $deviceIdRaw = & $rustdeskExe --get-id 2>&1 | Out-String
+        $match = [regex]::Match($deviceIdRaw, '\b\d{6,12}\b')
+        if ($match.Success) { $deviceId = $match.Value; break }
+    }
+    if (-not $deviceId) {
+        Write-Host "[!] Could not auto-retrieve Device ID via --get-id. Falling back to launching RustDesk UI." -ForegroundColor Yellow
+    }
+
+    # 10. Launch RustDesk user-mode UI so it appears in the tray and you can see the ID
+    Write-Step "Launching RustDesk window so you can see the ID in the tray..."
+    Start-Process -FilePath $rustdeskExe -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 4
+
+    # 11. Copy the Device ID to clipboard for your address-book paste on the tech machine
+    if ($deviceId) {
+        try {
+            Set-Clipboard -Value $deviceId
+            Write-Ok "Device ID $deviceId copied to clipboard"
+        } catch {
+            # Set-Clipboard may not be available on older PowerShell; still display the ID
+        }
     }
 
     Write-Host ""
@@ -262,11 +300,18 @@ verification-method = 'use-permanent-password'
     Write-Host "    Approve mode: password (no Accept prompt needed)"
     Write-Host ""
     Write-Host "  Connection details for your tech machine:"
+    Write-Host ""
     if ($deviceId) {
-        Write-Host "    Device ID:    $deviceId" -ForegroundColor Yellow
+        Write-Host "    +---------------------------+" -ForegroundColor Green
+        Write-Host "    |                           |" -ForegroundColor Green
+        Write-Host "    |  Device ID:  $($deviceId.PadRight(13))|" -ForegroundColor Green
+        Write-Host "    |                           |" -ForegroundColor Green
+        Write-Host "    +---------------------------+" -ForegroundColor Green
+        Write-Host "    (already copied to clipboard - paste into your tech client's address book)" -ForegroundColor DarkGray
     } else {
-        Write-Host "    Device ID:    (open RustDesk on this server to see the 9-digit ID)" -ForegroundColor Yellow
+        Write-Host "    Device ID:    (look at the RustDesk window that just opened - it shows at the top)" -ForegroundColor Yellow
     }
+    Write-Host ""
     if ($pwWasGenerated) {
         Write-Host "    Password:     $PermanentPassword" -ForegroundColor Yellow
         Write-Host "                  ^ COPY THIS NOW. It will not be shown again or saved to disk." -ForegroundColor Yellow
