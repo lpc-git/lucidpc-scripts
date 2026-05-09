@@ -243,26 +243,36 @@ verification-method = 'use-permanent-password'
         throw
     }
 
-    # Configure Windows Service Recovery: restart on crash with 5s delay (3 attempts).
-    # This handles the "service crashes mid-session" case (when service still exists).
-    & sc.exe failure RustDesk reset= 86400 actions= restart/5000/restart/5000/restart/5000 | Out-Null
-    Write-Verbose "Service failure recovery: restart on crash, 3 attempts, 5s delay"
+    # Auto-recovery layers -- each wrapped so a single failure doesn't abort the whole install.
+    # The script should ALWAYS reach Steps 4 and 5 even if recovery setup hits environmental
+    # quirks (AV-mediated stream interception, weird Windows policies, etc.). Layers that
+    # don't apply correctly get reported as [!!] in the final summary.
+    $script:recoveryStatus = @{ AutoStart = $false; Recovery = $false; Watchdog = $false }
 
-    # Watchdog scheduled task -- handles BOTH failure modes:
-    #   (a) service exists but Status=Stopped -> Start-Service
-    #   (b) service entry deleted entirely (RustDesk's "Stop Service" button calls
-    #       `sc delete RustDesk` -- the service literally vanishes from Windows)
-    #       In this case we need to RE-INSTALL the service via `rustdesk.exe --install-service`
-    # Runs every 5 min as SYSTEM. We use schtasks.exe (legacy, universally reliable on
-    # all Windows versions including Windows Server) instead of New-ScheduledTask cmdlets
-    # which have flaky Register/Get visibility especially on Server SKUs.
-    $watchdogName = 'LucidPC-RustDesk-Watchdog'
-    $watchdogDir = Join-Path $env:ProgramData 'LucidPC'
-    $watchdogPath = Join-Path $watchdogDir 'rustdesk-watchdog.ps1'
+    # Layer 1: Service auto-start verification (we already set it via Set-Service above)
+    try {
+        $svcCheck = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+        if ($svcCheck -and $svcCheck.StartType -eq 'Automatic') { $script:recoveryStatus.AutoStart = $true }
+    } catch { Write-Verbose "AutoStart verify threw: $($_.Exception.Message)" }
 
-    # 1. Write the watchdog logic to disk (file-based; task references this file)
-    New-Item -ItemType Directory -Force -Path $watchdogDir | Out-Null
-    $watchdogScript = @'
+    # Layer 2: Service Recovery -- restart on crash with 5s delay (3 attempts)
+    try {
+        # cmd.exe /c form to fully decouple from PS error stream interpretation
+        cmd.exe /c "sc failure RustDesk reset= 86400 actions= restart/5000/restart/5000/restart/5000 >nul 2>&1"
+        $failureOut = (cmd.exe /c "sc qfailure RustDesk 2>&1") 2>$null | Out-String
+        if ($failureOut -match 'RESTART') { $script:recoveryStatus.Recovery = $true }
+        Write-Verbose "Service Recovery configured (failure dump len=$($failureOut.Length))"
+    } catch { Write-Verbose "Recovery setup threw: $($_.Exception.Message)" }
+
+    # Layer 3: Watchdog scheduled task -- runs every 5 min as SYSTEM. Handles both
+    # service-stopped and service-deleted (RustDesk "Stop Service" button calls sc delete).
+    try {
+        $watchdogName = 'LucidPC-RustDesk-Watchdog'
+        $watchdogDir = Join-Path $env:ProgramData 'LucidPC'
+        $watchdogPath = Join-Path $watchdogDir 'rustdesk-watchdog.ps1'
+
+        if (-not (Test-Path $watchdogDir)) { New-Item -ItemType Directory -Force -Path $watchdogDir | Out-Null }
+        $watchdogScript = @'
 $rdExe = @("$env:ProgramFiles\RustDesk\rustdesk.exe", "$env:ProgramFiles\RustDesk\RustDesk.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $rdExe) { exit 0 }
 $svc = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
@@ -275,35 +285,19 @@ if (-not $svc) {
     Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
 }
 '@
-    Set-Content -Path $watchdogPath -Value $watchdogScript -Encoding ASCII -Force
+        Set-Content -Path $watchdogPath -Value $watchdogScript -Encoding ASCII -Force
 
-    # 2. Delete any prior task with this name (idempotent; ignores "doesn't exist")
-    & schtasks.exe /Delete /TN $watchdogName /F *>$null
-
-    # 3. Register the watchdog task via schtasks.exe -- runs every 5 min as SYSTEM
-    $taskCommand = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$watchdogPath`""
-    $schOutput = & schtasks.exe /Create /TN $watchdogName /TR $taskCommand /SC MINUTE /MO 5 /RU SYSTEM /RL HIGHEST /F 2>&1
-    $schExit = $LASTEXITCODE
-    Write-Verbose "schtasks /Create exit=$schExit output: $schOutput"
-
-    # 4. Verify the task exists
-    & schtasks.exe /Query /TN $watchdogName *>$null
-    $watchdogRegistered = ($LASTEXITCODE -eq 0)
-    if (-not $watchdogRegistered) {
-        Write-Verbose "Watchdog NOT visible via schtasks /Query after Create. Output was: $schOutput"
-    }
-
-    # Self-verify all three recovery layers are actually in place
-    $script:recoveryStatus = @{
-        AutoStart  = $false
-        Recovery   = $false
-        Watchdog   = $watchdogRegistered
-    }
-    $svcCheck = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
-    if ($svcCheck -and $svcCheck.StartType -eq 'Automatic') { $script:recoveryStatus.AutoStart = $true }
-    $failureOut = & sc.exe qfailure RustDesk 2>&1 | Out-String
-    if ($failureOut -match 'RESTART') { $script:recoveryStatus.Recovery = $true }
-    Write-Verbose ("Recovery verify: AutoStart={0} Recovery={1} Watchdog={2}" -f $script:recoveryStatus.AutoStart, $script:recoveryStatus.Recovery, $script:recoveryStatus.Watchdog)
+        # Delete prior task if present, then create. cmd.exe /c form so PowerShell's error
+        # stream handling never sees the `ERROR: The system cannot find the file specified.`
+        # output that schtasks produces when the target doesn't exist.
+        cmd.exe /c "schtasks /Delete /TN ""$watchdogName"" /F >nul 2>&1"
+        $taskCommand = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$watchdogPath`""
+        cmd.exe /c "schtasks /Create /TN ""$watchdogName"" /TR ""$taskCommand"" /SC MINUTE /MO 5 /RU SYSTEM /RL HIGHEST /F >nul 2>&1"
+        # Verify
+        cmd.exe /c "schtasks /Query /TN ""$watchdogName"" >nul 2>&1"
+        if ($LASTEXITCODE -eq 0) { $script:recoveryStatus.Watchdog = $true }
+        Write-Verbose "Watchdog registered: $($script:recoveryStatus.Watchdog)"
+    } catch { Write-Verbose "Watchdog setup threw: $($_.Exception.Message)" }
 
     Show-StepOk
 
