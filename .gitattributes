@@ -1,7 +1,8 @@
-# Shell scripts MUST have LF line endings or Linux can't run them
+# Shell scripts MUST have LF line endings or Linux/macOS can't run them
 # (otherwise: /usr/bin/env: 'bash\r': No such file or directory)
-*.sh    text eol=lf
-*.bash  text eol=lf
+*.sh        text eol=lf
+*.bash      text eol=lf
+*.command   text eol=lf
 
 # Windows scripts: CRLF is fine
 *.bat   text eol=crlf
