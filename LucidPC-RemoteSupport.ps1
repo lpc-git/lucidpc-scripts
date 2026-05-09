@@ -6,6 +6,8 @@
 param()
 
 $ErrorActionPreference = 'Stop'
+# Opt out of PS7.4+ throwing on native commands' non-zero exits (no-op on PS5.1)
+$PSNativeCommandUseErrorActionPreference = $false
 
 # --- LucidPC support server config ---
 $idServer    = 'live.lucidpc.com'
