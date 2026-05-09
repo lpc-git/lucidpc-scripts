@@ -31,10 +31,16 @@ User reads the technician their 9-digit ID and one-time password.
 ### Set up a Linux desktop/server for unattended access (technicians)
 
 ```bash
+curl -sfL https://raw.githubusercontent.com/lpc-git/lucidpc-scripts/main/LucidPC-ServerInstall.sh | sudo bash
+```
+
+The script will prompt for the permanent password with input hidden. If you'd rather pass it non-interactively (e.g. for automation), use:
+
+```bash
 curl -sfL https://raw.githubusercontent.com/lpc-git/lucidpc-scripts/main/LucidPC-ServerInstall.sh | sudo LUCIDPC_RUSTDESK_PW='YourPassword' bash
 ```
 
-If running from an interactive shell (not piped), the script prompts for the password instead of needing the env var. To re-run on an existing server (skip the password prompt, just refresh config + recovery):
+To re-run on an existing server (skip the password prompt, just refresh config + recovery):
 
 ```bash
 curl -sfL https://raw.githubusercontent.com/lpc-git/lucidpc-scripts/main/LucidPC-ServerInstall.sh | sudo SKIP_PASSWORD=1 bash
@@ -53,11 +59,16 @@ User reads the technician their 9-digit ID and one-time password from the RustDe
 ### Set up a Mac for unattended access (technicians)
 
 ```bash
+curl -sfL https://raw.githubusercontent.com/lpc-git/lucidpc-scripts/main/LucidPC-ServerInstall.command | bash
+```
+
+The script will prompt for the permanent password with input hidden. For non-interactive use:
+
+```bash
 curl -sfL https://raw.githubusercontent.com/lpc-git/lucidpc-scripts/main/LucidPC-ServerInstall.command | LUCIDPC_RUSTDESK_PW='YourPassword' bash
 ```
 
-If running interactively (not piped) it prompts for the password. To re-run on
-an already-onboarded Mac (skip the password prompt, just refresh config + recovery):
+To re-run on an already-onboarded Mac (skip the password prompt, just refresh config + recovery):
 
 ```bash
 curl -sfL https://raw.githubusercontent.com/lpc-git/lucidpc-scripts/main/LucidPC-ServerInstall.command | SKIP_PASSWORD=1 bash

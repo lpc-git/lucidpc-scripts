@@ -56,6 +56,15 @@ if [[ "$SKIP_PASSWORD" == "1" ]] || ([[ "$PW_ALREADY_SET" == "1" ]] && [[ -z "$P
 else
     SKIP_PW_STEP=0
     if [[ -z "$PERMANENT_PASSWORD" ]]; then
+        # Read from /dev/tty so the prompt works under `curl ... | sudo bash` --
+        # without this, `read` competes with bash's stdin (the script itself)
+        # and silently gets nothing.
+        if [[ ! -r /dev/tty ]]; then
+            err "No terminal available for password prompt."
+            echo "    Re-run with the password as an env var:" >&2
+            echo "    curl ... | sudo LUCIDPC_RUSTDESK_PW='YourPw' bash" >&2
+            exit 1
+        fi
         clear
         echo ""
         echo "  LucidPC RustDesk Setup (Linux)"
@@ -63,9 +72,9 @@ else
         echo ""
         echo "  Paste the LucidPC support password (input is hidden)."
         echo ""
-        read -r -s -p "  Password: " PW1 ; echo
+        read -r -s -p "  Password: " PW1 < /dev/tty ; echo
         if [[ -z "$PW1" ]]; then err "Password required."; exit 1; fi
-        read -r -s -p "  Confirm : " PW2 ; echo
+        read -r -s -p "  Confirm : " PW2 < /dev/tty ; echo
         if [[ "$PW1" != "$PW2" ]]; then err "Passwords did not match."; exit 1; fi
         if [[ ${#PW1} -lt 8 ]]; then err "Password must be at least 8 characters."; exit 1; fi
         PERMANENT_PASSWORD="$PW1"
