@@ -188,33 +188,59 @@ verification-method = 'use-permanent-password'
     Show-StepOk
 
     # Step 3: Ensure the Windows service exists, then start it.
-    # Edge case: rustdesk.exe is installed but the service entry is missing.
-    # Causes: previous "Stop Service" click in the GUI (deletes service via `sc delete`),
-    # interrupted installer, restricted Windows builds. Recover by calling the CLI's
-    # built-in service register (--install-service) before trying to start.
+    # Each sub-action wrapped so failures report which one specifically broke -- useful
+    # when the user's Windows build has unusual restrictions (Defender quarantine, AppLocker,
+    # disabled service install, etc.). Reports stay informative even with EAP=Stop.
     Show-Step 3 5 "Starting RustDesk service..."
-    $svc = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
-    if (-not $svc) {
-        Write-Verbose "RustDesk service not registered -- running rustdesk.exe --install-service"
-        & $rustdeskExe --install-service 2>&1 | Out-Null
-        Start-Sleep -Seconds 3
-        $svc = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
-    }
-    if (-not $svc) {
-        Show-StepFail "Could not register RustDesk service. Try reinstalling RustDesk manually."
-        throw "Service registration failed"
-    }
-    Set-Service -Name 'RustDesk' -StartupType Automatic -ErrorAction SilentlyContinue
-    if ($svc.Status -ne 'Running') {
-        Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
-    }
-    Start-Sleep -Seconds 4
-    $svc.Refresh()
-    $tries = 0
-    while ($svc.Status -ne 'Running' -and $tries -lt 6) { Start-Sleep -Seconds 2; $svc.Refresh(); $tries++ }
-    if ($svc.Status -ne 'Running') {
-        Show-StepFail "Service registered but didn't start (status: $($svc.Status))"
-        throw "Service not running"
+    $stage = "init"
+    try {
+        $stage = "Get-Service initial check"
+        $svc = $null
+        try { $svc = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue } catch { Write-Verbose "Initial Get-Service threw: $($_.Exception.Message)" }
+
+        if (-not $svc) {
+            $stage = "rustdesk.exe --install-service"
+            Write-Verbose "RustDesk service not registered. rustdeskExe='$rustdeskExe'. Running --install-service."
+            if (-not $rustdeskExe -or -not (Test-Path $rustdeskExe)) {
+                Show-StepFail "rustdesk.exe path is invalid: '$rustdeskExe'"
+                throw "rustdesk.exe missing"
+            }
+            $installOut = & $rustdeskExe --install-service 2>&1 | Out-String
+            Write-Verbose "--install-service output: $installOut"
+            Start-Sleep -Seconds 3
+            $stage = "Get-Service after --install-service"
+            try { $svc = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue } catch { Write-Verbose "Post-install Get-Service threw: $($_.Exception.Message)" }
+        }
+
+        if (-not $svc) {
+            Show-StepFail "Could not register RustDesk service. Output of --install-service: $installOut"
+            throw "Service registration failed"
+        }
+
+        $stage = "Set-Service Automatic"
+        Set-Service -Name 'RustDesk' -StartupType Automatic -ErrorAction SilentlyContinue
+
+        if ($svc.Status -ne 'Running') {
+            $stage = "Start-Service"
+            Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+        }
+
+        $stage = "wait for Running state"
+        Start-Sleep -Seconds 4
+        $svc.Refresh()
+        $tries = 0
+        while ($svc.Status -ne 'Running' -and $tries -lt 6) { Start-Sleep -Seconds 2; $svc.Refresh(); $tries++ }
+
+        if ($svc.Status -ne 'Running') {
+            Show-StepFail "Service registered but didn't start (status: $($svc.Status))"
+            throw "Service not running"
+        }
+    } catch {
+        # Add stage context to whatever bubbled up
+        if ($_.Exception.Message -notmatch 'rustdesk\.exe missing|Service registration failed|Service not running') {
+            Show-StepFail "stage=[$stage] $($_.Exception.Message)"
+        }
+        throw
     }
 
     # Configure Windows Service Recovery: restart on crash with 5s delay (3 attempts).
