@@ -68,15 +68,38 @@ fi
 TARGET_HOME="$(dscl . -read "/Users/$TARGET_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
 [[ -z "$TARGET_HOME" ]] && TARGET_HOME="/Users/$TARGET_USER"
 
-# Acquire sudo up front so prompts don't interleave with progress lines later
+# Acquire sudo up front so prompts don't interleave with progress lines later.
+# The script asks for two passwords during install:
+#   1. Mac account password (this sudo prompt) -- needed to write to
+#      /Applications, /Library/LaunchAgents, /Library/LaunchDaemons.
+#   2. LucidPC support password (later) -- the permanent unattended-access
+#      password that the technician uses to remote into this Mac.
+# Both prompts are announced clearly so users know which is which.
 if [[ "$(id -u)" != "0" ]]; then
     if ! sudo -n true 2>/dev/null; then
+        clear
+        cat <<'EOF'
+
+  LucidPC RustDesk Setup (macOS)
+  ==============================
+
+  This installer will ask you for TWO passwords:
+
+    [1/2]  Your Mac account password (the one you use to log into this
+           computer). Needed to install RustDesk to /Applications. Just
+           the standard macOS password prompt -- typed by hand, not
+           pasted from a message.
+
+    [2/2]  The LucidPC support password. This is the permanent password
+           your LucidPC technician uses to remote into this Mac.
+           If you don't have it, contact your technician.
+
+  Press Ctrl+C any time to abort.
+
+EOF
+        # Custom sudo prompt makes it unmistakable which password is wanted
+        sudo -p "  [1/2] Mac account password: " -v
         echo
-        echo "  This script needs administrator access for the system-level steps"
-        echo "  (installing to /Applications, creating LaunchDaemons, restarting"
-        echo "  the RustDesk service). You'll be asked for your Mac password."
-        echo
-        sudo -v
     fi
     # Keep sudo alive for the duration of the script
     ( while true; do sudo -n true; sleep 50; done ) 2>/dev/null &
@@ -110,16 +133,17 @@ else
             echo "    curl ... | LUCIDPC_RUSTDESK_PW='YourPw' bash" >&2
             exit 1
         fi
-        clear
         echo ""
-        echo "  LucidPC RustDesk Setup (macOS)"
-        echo "  =============================="
+        echo "  [2/2] LucidPC support password"
+        echo "  ------------------------------"
+        echo "  This is the permanent password your LucidPC technician uses to"
+        echo "  remote into this Mac. NOT your Mac account password (that was"
+        echo "  step 1). If you don't have this password, contact your technician."
+        echo "  Paste it now (input is hidden -- nothing will appear as you type)."
         echo ""
-        echo "  Paste the LucidPC support password (input is hidden)."
-        echo ""
-        read -r -s -p "  Password: " PW1 < /dev/tty ; echo
+        read -r -s -p "  LucidPC support password: " PW1 < /dev/tty ; echo
         if [[ -z "$PW1" ]]; then err "Password required."; exit 1; fi
-        read -r -s -p "  Confirm : " PW2 < /dev/tty ; echo
+        read -r -s -p "  Confirm                 : " PW2 < /dev/tty ; echo
         if [[ "$PW1" != "$PW2" ]]; then err "Passwords did not match."; exit 1; fi
         if [[ ${#PW1} -lt 8 ]]; then err "Password must be at least 8 characters."; exit 1; fi
         PERMANENT_PASSWORD="$PW1"
