@@ -68,17 +68,73 @@ fi
 TARGET_HOME="$(dscl . -read "/Users/$TARGET_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
 [[ -z "$TARGET_HOME" ]] && TARGET_HOME="/Users/$TARGET_USER"
 
-# Acquire sudo up front so prompts don't interleave with progress lines later.
-# The script asks for two passwords during install:
-#   1. Mac account password (this sudo prompt) -- needed to write to
-#      /Applications, /Library/LaunchAgents, /Library/LaunchDaemons.
-#   2. LucidPC support password (later) -- the permanent unattended-access
-#      password that the technician uses to remote into this Mac.
-# Both prompts are announced clearly so users know which is which.
+# --- GUI dialog detection + helper ----------------------------------------
+# We try to collect both the Mac admin password AND the LucidPC support
+# password via native macOS dialogs (osascript). Native dialogs are visually
+# distinct from each other and from Terminal prompts, so users can't confuse
+# them. Falls back to Terminal /dev/tty prompts if osascript is unavailable
+# (SSH session, headless context, no console user, etc.).
+HAS_GUI=0
+CONSOLE_USER_FOR_GUI="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
+if command -v osascript >/dev/null 2>&1 \
+   && [[ -n "$CONSOLE_USER_FOR_GUI" ]] \
+   && [[ "$CONSOLE_USER_FOR_GUI" != "root" ]]; then
+    # Smoke test: can osascript actually display a dialog? If we're running
+    # without a window server (headless), it'll fail.
+    if osascript -e 'tell application "System Events" to count' >/dev/null 2>&1; then
+        HAS_GUI=1
+    fi
+fi
+
+# Pop a native password dialog. Args: TITLE, PROMPT_TEXT.
+# Echoes the entered password to stdout. Returns 1 if cancelled or empty.
+ask_password_gui() {
+    local title="$1" prompt="$2" pw
+    pw=$(osascript <<APPLESCRIPT 2>/dev/null
+try
+    tell application "System Events" to activate
+    set the_pw to text returned of (display dialog "$prompt" with title "$title" default answer "" with hidden answer buttons {"Cancel", "OK"} default button "OK" cancel button "Cancel" with icon note giving up after 600)
+    return the_pw
+on error
+    return ""
+end try
+APPLESCRIPT
+    )
+    if [[ -z "$pw" ]]; then return 1; fi
+    printf '%s' "$pw"
+    return 0
+}
+
+# Acquire sudo. Two-password flow:
+#   1. Mac account password -- needed to write to /Applications, /Library/...
+#   2. LucidPC support password -- the unattended-access password
+# When GUI is available, both are collected via native dialogs (no Terminal
+# prompts). Otherwise we fall back to Terminal with [1/2] / [2/2] labels.
 if [[ "$(id -u)" != "0" ]]; then
     if ! sudo -n true 2>/dev/null; then
-        clear
-        cat <<'EOF'
+        if [[ "$HAS_GUI" == "1" ]]; then
+            # Native dialog for Mac account password
+            ADMIN_PW="$(ask_password_gui "LucidPC RustDesk Setup — Step 1 of 2" "Enter your Mac account password.
+
+This is the password you use to log into this Mac. It's needed so the installer can copy RustDesk to your Applications folder.
+
+(The LucidPC support password comes next, in a separate dialog.)")"
+            if [[ -z "$ADMIN_PW" ]]; then
+                err "Cancelled at Mac password prompt."
+                exit 1
+            fi
+            # Prime sudo's credential cache, then wipe the variable. Subsequent
+            # sudo calls within ~5 min run without prompting.
+            if ! echo "$ADMIN_PW" | sudo -S -v -p '' >/dev/null 2>&1; then
+                unset ADMIN_PW
+                err "Mac account password rejected. Try again or use Terminal directly."
+                exit 1
+            fi
+            unset ADMIN_PW
+        else
+            # Terminal fallback
+            clear
+            cat <<'EOF'
 
   LucidPC RustDesk Setup (macOS)
   ==============================
@@ -86,20 +142,17 @@ if [[ "$(id -u)" != "0" ]]; then
   This installer will ask you for TWO passwords:
 
     [1/2]  Your Mac account password (the one you use to log into this
-           computer). Needed to install RustDesk to /Applications. Just
-           the standard macOS password prompt -- typed by hand, not
-           pasted from a message.
+           computer). Needed to install RustDesk to /Applications.
 
-    [2/2]  The LucidPC support password. This is the permanent password
-           your LucidPC technician uses to remote into this Mac.
+    [2/2]  The LucidPC support password (used to remote into this Mac).
            If you don't have it, contact your technician.
 
   Press Ctrl+C any time to abort.
 
 EOF
-        # Custom sudo prompt makes it unmistakable which password is wanted
-        sudo -p "  [1/2] Mac account password: " -v
-        echo
+            sudo -p "  [1/2] Mac account password: " -v
+            echo
+        fi
     fi
     # Keep sudo alive for the duration of the script
     ( while true; do sudo -n true; sleep 50; done ) 2>/dev/null &
@@ -124,30 +177,50 @@ if [[ "$SKIP_PASSWORD" == "1" ]] || ([[ "$PW_ALREADY_SET" == "1" ]] && [[ -z "$P
 else
     SKIP_PW_STEP=0
     if [[ -z "$PERMANENT_PASSWORD" ]]; then
-        # Read from /dev/tty so the prompt works under `curl ... | bash` --
-        # without this, `read` would compete with bash's stdin (the script
-        # itself) and silently get nothing.
-        if [[ ! -r /dev/tty ]]; then
-            err "No terminal available for password prompt."
+        if [[ "$HAS_GUI" == "1" ]]; then
+            # Native dialog for the LucidPC support password (with confirmation)
+            PW1=""; PW2=""
+            for attempt in 1 2 3; do
+                PW1="$(ask_password_gui "LucidPC RustDesk Setup — Step 2 of 2" "Enter the LucidPC support password.
+
+This is the permanent password your LucidPC technician will use to remote into this Mac. It is NOT your Mac account password (that was step 1).
+
+If you don't have this password, click Cancel and contact your technician.")" || { err "Cancelled at LucidPC password prompt."; exit 1; }
+                PW2="$(ask_password_gui "LucidPC RustDesk Setup — Confirm" "Re-enter the LucidPC support password to confirm.")" \
+                    || { err "Cancelled at LucidPC password confirmation."; exit 1; }
+                if [[ "$PW1" == "$PW2" ]] && [[ ${#PW1} -ge 8 ]]; then break; fi
+                osascript -e "display dialog \"Passwords didn't match, or were under 8 characters. Please try again.\" with title \"LucidPC RustDesk Setup\" buttons {\"OK\"} default button \"OK\" with icon caution" >/dev/null 2>&1
+                PW1=""; PW2=""
+            done
+            if [[ -z "$PW1" ]] || [[ "$PW1" != "$PW2" ]] || [[ ${#PW1} -lt 8 ]]; then
+                err "Could not capture a valid LucidPC password after 3 attempts."
+                exit 1
+            fi
+            PERMANENT_PASSWORD="$PW1"
+            unset PW1 PW2
+        elif [[ -r /dev/tty ]]; then
+            # Terminal fallback (no GUI / SSH session)
+            echo ""
+            echo "  [2/2] LucidPC support password"
+            echo "  ------------------------------"
+            echo "  This is the permanent password your LucidPC technician uses to"
+            echo "  remote into this Mac. NOT your Mac account password (that was"
+            echo "  step 1). If you don't have this password, contact your technician."
+            echo "  Paste it now (input is hidden -- nothing will appear as you type)."
+            echo ""
+            read -r -s -p "  LucidPC support password: " PW1 < /dev/tty ; echo
+            if [[ -z "$PW1" ]]; then err "Password required."; exit 1; fi
+            read -r -s -p "  Confirm                 : " PW2 < /dev/tty ; echo
+            if [[ "$PW1" != "$PW2" ]]; then err "Passwords did not match."; exit 1; fi
+            if [[ ${#PW1} -lt 8 ]]; then err "Password must be at least 8 characters."; exit 1; fi
+            PERMANENT_PASSWORD="$PW1"
+            unset PW1 PW2
+        else
+            err "No way to prompt for password (no GUI, no terminal)."
             echo "    Re-run with the password as an env var:" >&2
             echo "    curl ... | LUCIDPC_RUSTDESK_PW='YourPw' bash" >&2
             exit 1
         fi
-        echo ""
-        echo "  [2/2] LucidPC support password"
-        echo "  ------------------------------"
-        echo "  This is the permanent password your LucidPC technician uses to"
-        echo "  remote into this Mac. NOT your Mac account password (that was"
-        echo "  step 1). If you don't have this password, contact your technician."
-        echo "  Paste it now (input is hidden -- nothing will appear as you type)."
-        echo ""
-        read -r -s -p "  LucidPC support password: " PW1 < /dev/tty ; echo
-        if [[ -z "$PW1" ]]; then err "Password required."; exit 1; fi
-        read -r -s -p "  Confirm                 : " PW2 < /dev/tty ; echo
-        if [[ "$PW1" != "$PW2" ]]; then err "Passwords did not match."; exit 1; fi
-        if [[ ${#PW1} -lt 8 ]]; then err "Password must be at least 8 characters."; exit 1; fi
-        PERMANENT_PASSWORD="$PW1"
-        unset PW1 PW2
     fi
 fi
 
