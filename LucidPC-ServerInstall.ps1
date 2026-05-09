@@ -63,12 +63,28 @@ function Show-StepOk { Write-Host "done" -ForegroundColor Green }
 function Show-StepFail { param([string]$msg) Write-Host "FAILED" -ForegroundColor Red; if ($msg) { Write-Host "    $msg" -ForegroundColor Red } }
 function Show-Error { param([string]$msg) Write-Host "`n  Error: $msg" -ForegroundColor Red }
 
-# Require admin
+# Self-elevate to admin if needed. UAC prompt appears, user clicks Yes once,
+# the elevated copy runs in a new window with the original parameters forwarded.
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    Show-Error "This script must run as Administrator. Right-click PowerShell -> Run as Administrator."
-    Read-Host "`nPress Enter to exit"
-    exit 1
+    if (-not $PSCommandPath) {
+        # Running via iex / piped -- no script file to re-launch. Bootstrap should be used instead.
+        Show-Error "Run via the bootstrap one-liner so it can self-elevate, or save the script to a file first."
+        Write-Host "  Bootstrap: iex (irm https://raw.githubusercontent.com/lpc-git/lucidpc-scripts/main/bootstrap-server.ps1)" -ForegroundColor DarkGray
+        Read-Host "`nPress Enter to exit"
+        exit 1
+    }
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
+    if ($GeneratePassword.IsPresent)            { $argList += '-GeneratePassword' }
+    if ($ForcePassword.IsPresent)               { $argList += '-ForcePassword' }
+    if ($SkipPassword.IsPresent)                { $argList += '-SkipPassword' }
+    if (-not [string]::IsNullOrEmpty($PermanentPassword)) {
+        $argList += '-PermanentPassword'; $argList += "`"$PermanentPassword`""
+    }
+    if ($GeneratedLength -ne 20)                { $argList += '-GeneratedLength'; $argList += $GeneratedLength }
+    if ($VerbosePreference -eq 'Continue')      { $argList += '-Verbose' }
+    Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Verb RunAs
+    exit 0
 }
 
 # --- Decide whether the password step is even needed ---
