@@ -30,6 +30,13 @@ param(
 $ErrorActionPreference = 'Stop'
 $VerbosePreference = if ($VerbosePreference -eq 'SilentlyContinue') { 'SilentlyContinue' } else { $VerbosePreference }
 
+# PowerShell 7.4+ default: throws NativeCommandException when a native command exits
+# non-zero AND ErrorActionPreference=Stop. We use sc.exe and schtasks.exe with patterns
+# like "delete if exists, ignore if missing" -- those exit non-zero on missing items
+# which is expected, not an error. Disable the new behavior to keep the legacy 5.1 semantics.
+# (No-op on Windows PowerShell 5.1 since this variable doesn't exist there.)
+$PSNativeCommandUseErrorActionPreference = $false
+
 # --- LucidPC server config ---
 $idServer    = 'live.lucidpc.com'
 $relayServer = 'live.lucidpc.com'
