@@ -180,16 +180,33 @@ verification-method = 'use-permanent-password'
     }
     Show-StepOk
 
-    # Step 3: Start service so the password CLI can talk to it via IPC
+    # Step 3: Ensure the Windows service exists, then start it.
+    # Edge case: rustdesk.exe is installed but the service entry is missing.
+    # Causes: previous "Stop Service" click in the GUI (deletes service via `sc delete`),
+    # interrupted installer, restricted Windows builds. Recover by calling the CLI's
+    # built-in service register (--install-service) before trying to start.
     Show-Step 3 5 "Starting RustDesk service..."
-    Set-Service -Name 'RustDesk' -StartupType Automatic -ErrorAction SilentlyContinue
-    Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 4
     $svc = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+    if (-not $svc) {
+        Write-Verbose "RustDesk service not registered -- running rustdesk.exe --install-service"
+        & $rustdeskExe --install-service 2>&1 | Out-Null
+        Start-Sleep -Seconds 3
+        $svc = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+    }
+    if (-not $svc) {
+        Show-StepFail "Could not register RustDesk service. Try reinstalling RustDesk manually."
+        throw "Service registration failed"
+    }
+    Set-Service -Name 'RustDesk' -StartupType Automatic -ErrorAction SilentlyContinue
+    if ($svc.Status -ne 'Running') {
+        Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Seconds 4
+    $svc.Refresh()
     $tries = 0
-    while ($svc -and $svc.Status -ne 'Running' -and $tries -lt 6) { Start-Sleep -Seconds 2; $svc.Refresh(); $tries++ }
-    if (-not $svc -or $svc.Status -ne 'Running') {
-        Show-StepFail "Service didn't start (status: $($svc.Status))"
+    while ($svc.Status -ne 'Running' -and $tries -lt 6) { Start-Sleep -Seconds 2; $svc.Refresh(); $tries++ }
+    if ($svc.Status -ne 'Running') {
+        Show-StepFail "Service registered but didn't start (status: $($svc.Status))"
         throw "Service not running"
     }
 
