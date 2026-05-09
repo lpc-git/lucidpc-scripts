@@ -313,19 +313,23 @@ if (-not $svc) {
         $action = New-ScheduledTaskAction -Execute $rustdeskExe -Argument "--password `"$PermanentPassword`""
         $principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -RunLevel Highest -LogonType ServiceAccount
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Seconds 30)
-        Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
-        Start-ScheduledTask -TaskName $taskName
+        # CRITICAL: -Verbose:$false suppresses the cmdlet's automatic XML dump which would
+        # otherwise leak the password (which is in $action's arguments) to verbose output.
+        # Same for Get-ScheduledTask / Get-ScheduledTaskInfo / Unregister -- they can dump
+        # task definitions including the original arguments.
+        Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force -Verbose:$false | Out-Null
+        Start-ScheduledTask -TaskName $taskName -Verbose:$false
         $waited = 0
-        while ((Get-ScheduledTask -TaskName $taskName).State -ne 'Ready' -and $waited -lt 30) {
+        while ((Get-ScheduledTask -TaskName $taskName -Verbose:$false).State -ne 'Ready' -and $waited -lt 30) {
             Start-Sleep -Seconds 1; $waited++
         }
-        $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName
-        Write-Verbose "Scheduled task LastTaskResult: $($taskInfo.LastTaskResult) (waited ${waited}s)"
+        $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -Verbose:$false
+        Write-Verbose "Scheduled password-set task LastTaskResult: $($taskInfo.LastTaskResult) (waited ${waited}s)"
         if ($taskInfo.LastTaskResult -eq 0) { $passwordSet = $true }
     } catch {
         Write-Verbose "Scheduled task method failed: $($_.Exception.Message)"
     } finally {
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue -Verbose:$false
     }
 
     # Restart service so it picks up the password
