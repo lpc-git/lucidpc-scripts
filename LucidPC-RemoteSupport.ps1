@@ -8,13 +8,19 @@ param()
 $ErrorActionPreference = 'Stop'
 # Opt out of PS7.4+ throwing on native commands' non-zero exits (no-op on PS5.1)
 $PSNativeCommandUseErrorActionPreference = $false
+# GitHub requires TLS 1.2+; some Windows PowerShell setups don't offer it by default
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
 
 # --- LucidPC support server config ---
 $idServer    = 'live.lucidpc.com'
 $relayServer = 'live.lucidpc.com'
 $apiServer   = 'https://live.lucidpc.com'
 $publicKey   = 'hRakm22D+ZsyQUwQ5nf3tRAPAlbb39LYEQAP0UDet9k='
-$rustdeskUrl = 'https://github.com/rustdesk/rustdesk/releases/latest/download/rustdesk-1.4.6-x86_64.exe'
+# Fallback installer if the GitHub API can't be reached. Full-version URLs stay
+# downloadable forever; only the version goes stale. Never use a
+# releases/latest/download/ URL with a versioned filename -- it 404s as soon as
+# RustDesk publishes a newer release (bit us at 1.4.6 -> 1.4.9, 2026-08-11).
+$rustdeskFallbackUrl = 'https://github.com/rustdesk/rustdesk/releases/download/1.4.9/rustdesk-1.4.9-x86_64.exe'
 # --------------------------------------
 
 function Show-Step {
@@ -24,6 +30,20 @@ function Show-Step {
 }
 function Show-StepOk { Write-Host "done" -ForegroundColor Green }
 function Show-Error { param([string]$msg) Write-Host "`n  Error: $msg" -ForegroundColor Red }
+
+function Get-RustDeskInstallerUrl {
+    # Ask GitHub which installer the current release ships, so new RustDesk
+    # versions keep installing without a script update.
+    try {
+        $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/rustdesk/rustdesk/releases/latest' -Headers @{ 'Accept' = 'application/vnd.github.v3+json' } -UseBasicParsing -TimeoutSec 30
+        $asset = $release.assets | Where-Object { $_.name -match '^rustdesk-[0-9][0-9.]*-x86_64\.exe$' } | Select-Object -First 1
+        if ($asset -and $asset.browser_download_url) { return $asset.browser_download_url }
+        Write-Verbose "No x86_64 exe asset found in latest release; using fallback URL"
+    } catch {
+        Write-Verbose "GitHub API lookup failed ($($_.Exception.Message)); using fallback URL"
+    }
+    return $rustdeskFallbackUrl
+}
 
 Clear-Host
 Write-Host ""
@@ -47,6 +67,7 @@ try {
     $rustdeskExe = $rustdeskExePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
     if (-not $rustdeskExe) {
         $installer = Join-Path $env:TEMP 'rustdesk-installer.exe'
+        $rustdeskUrl = Get-RustDeskInstallerUrl
         Write-Verbose "Downloading $rustdeskUrl"
         Invoke-WebRequest -Uri $rustdeskUrl -OutFile $installer -UseBasicParsing
         $proc = Start-Process -FilePath $installer -ArgumentList '--silent-install' -PassThru
