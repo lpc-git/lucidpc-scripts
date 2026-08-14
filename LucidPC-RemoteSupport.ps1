@@ -32,8 +32,18 @@ function Show-StepOk { Write-Host "done" -ForegroundColor Green }
 function Show-Error { param([string]$msg) Write-Host "`n  Error: $msg" -ForegroundColor Red }
 
 function Get-RustDeskInstallerUrl {
-    # Ask GitHub which installer the current release ships, so new RustDesk
-    # versions keep installing without a script update.
+    # Source 1: LucidPC's own resolver (n8n on flow.lucidpc.com). Always warm,
+    # cached server-side, never rate-limited. Only URLs pointing at RustDesk's
+    # official GitHub releases are accepted, so the resolver can't redirect
+    # installs anywhere else.
+    try {
+        $resolved = Invoke-RestMethod -Uri 'https://flow.lucidpc.com/webhook/rustdesk-latest' -UseBasicParsing -TimeoutSec 10
+        if ($resolved -and $resolved.url -match '^https://github\.com/rustdesk/rustdesk/releases/download/') { return $resolved.url }
+        Write-Verbose "LucidPC resolver returned no usable URL; trying GitHub API"
+    } catch {
+        Write-Verbose "LucidPC resolver unreachable ($($_.Exception.Message)); trying GitHub API"
+    }
+    # Source 2: GitHub releases API directly (rate-limited to 60/hr per IP).
     try {
         $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/rustdesk/rustdesk/releases/latest' -Headers @{ 'Accept' = 'application/vnd.github.v3+json' } -UseBasicParsing -TimeoutSec 30
         $asset = $release.assets | Where-Object { $_.name -match '^rustdesk-[0-9][0-9.]*-x86_64\.exe$' } | Select-Object -First 1
@@ -42,6 +52,7 @@ function Get-RustDeskInstallerUrl {
     } catch {
         Write-Verbose "GitHub API lookup failed ($($_.Exception.Message)); using fallback URL"
     }
+    # Source 3: pinned full-version URL. Never 404s, only goes stale.
     return $rustdeskFallbackUrl
 }
 
