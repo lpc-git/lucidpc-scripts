@@ -182,9 +182,35 @@ api-server = '$apiServer'
 custom-rendezvous-server = '$idServer'
 key = '$publicKey'
 "@
-    $cfgDir = Join-Path $env:APPDATA 'RustDesk\config'
-    New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
-    [System.IO.File]::WriteAllText((Join-Path $cfgDir 'RustDesk2.toml'), $configToml, [System.Text.UTF8Encoding]::new($false))
+    # Write to ALL THREE config locations, not just the user one.
+    #
+    # This script restarts the RustDesk SERVICE a few lines below, and the service
+    # runs as LocalSystem - so it reads the SYSTEM copy, never %APPDATA%. Writing
+    # only the user copy meant the restart picked up the OLD settings, and worse:
+    # RustDesk's ipc::get_options_() pulls options FROM the service and overwrites
+    # the user copy with them, so a correct user-side write gets silently reverted
+    # on any machine where the service exists.
+    #
+    # The two SYSTEM paths need elevation. An attended, non-admin support session
+    # legitimately cannot write them - and does not need to, because with no
+    # service installed the GUI process reads the user copy. So this is
+    # best-effort per directory rather than a hard failure.
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    $wrote = 0
+    foreach ($cfgDir in @(
+        (Join-Path $env:APPDATA 'RustDesk\config'),
+        'C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config',
+        'C:\Windows\System32\config\systemprofile\AppData\Roaming\RustDesk\config'
+    )) {
+        try {
+            New-Item -ItemType Directory -Force -Path $cfgDir -ErrorAction Stop | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $cfgDir 'RustDesk2.toml'), $configToml, $utf8NoBom)
+            $wrote++
+        } catch {
+            Write-Verbose "Could not write $cfgDir (needs Administrator): $($_.Exception.Message)"
+        }
+    }
+    if ($wrote -eq 0) { Show-Error "Could not write the RustDesk configuration anywhere." }
 
     # Restart service if it exists, so it picks up the config
     Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue | Stop-Service -Force -ErrorAction SilentlyContinue
