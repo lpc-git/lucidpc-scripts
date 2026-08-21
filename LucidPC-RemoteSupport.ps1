@@ -56,6 +56,46 @@ function Get-RustDeskInstallerUrl {
     return $rustdeskFallbackUrl
 }
 
+# All three resolver tiers return a URL shaped like
+#   https://github.com/rustdesk/rustdesk/releases/download/<ver>/rustdesk-<ver>-x86_64.exe
+# so the version we are ABOUT to install can always be read straight off the URL.
+function Get-RustDeskVersionFromUrl {
+    param([string]$Url)
+    if ($Url -match '/releases/download/([0-9]+(?:\.[0-9]+)*)/') { return $Matches[1] }
+    return ''
+}
+
+function Get-InstalledRustDeskVersion {
+    param([string]$ExePath)
+    if ([string]::IsNullOrWhiteSpace($ExePath) -or -not (Test-Path $ExePath)) { return '' }
+    try {
+        $info = (Get-Item $ExePath).VersionInfo
+        foreach ($candidate in @($info.ProductVersion, $info.FileVersion)) {
+            if ($candidate -and ($candidate -match '([0-9]+(?:\.[0-9]+)+)')) { return $Matches[1] }
+        }
+    } catch {
+        Write-Verbose "Could not read version from ${ExePath}: $($_.Exception.Message)"
+    }
+    return ''
+}
+
+# Normalise to exactly three components before comparing. Without this,
+# [version]'1.4.9' -lt [version]'1.4.9.0' is TRUE (Revision -1 vs 0), which would
+# make an already-current machine reinstall on every single run.
+function ConvertTo-RdVersion {
+    param([string]$Raw)
+    if ([string]::IsNullOrWhiteSpace($Raw)) { return $null }
+    if ($Raw -notmatch '([0-9]+(?:\.[0-9]+)*)') { return $null }
+    $parts = $Matches[1].Split('.')
+    $nums  = @(0, 0, 0)
+    for ($i = 0; $i -lt 3; $i++) {
+        if ($i -lt $parts.Count) {
+            try { $nums[$i] = [int]$parts[$i] } catch { $nums[$i] = 0 }
+        }
+    }
+    return [version]("{0}.{1}.{2}" -f $nums[0], $nums[1], $nums[2])
+}
+
 Clear-Host
 Write-Host ""
 Write-Host "  LucidPC Remote Support" -ForegroundColor White
@@ -72,21 +112,48 @@ try {
     Start-Sleep -Seconds 1
     Show-StepOk
 
-    # Step 2: Install RustDesk if not already installed
-    Show-Step 2 4 "Installing RustDesk..."
+    # Step 2: Install RustDesk, or upgrade it when the installed copy is older
+    # than the current release. Checking only "is it present" left every machine
+    # that had ever run RustDesk stuck on its original version -- which is what
+    # produces "Your installation is lower version" and a client that will not
+    # register. A support call is exactly when that must not happen.
     $rustdeskExePaths = @("$env:ProgramFiles\RustDesk\rustdesk.exe", "$env:ProgramFiles\RustDesk\RustDesk.exe")
     $rustdeskExe = $rustdeskExePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+    $rustdeskUrl = Get-RustDeskInstallerUrl
+    $latestVersion    = ConvertTo-RdVersion (Get-RustDeskVersionFromUrl $rustdeskUrl)
+    $installedVersion = ConvertTo-RdVersion (Get-InstalledRustDeskVersion $rustdeskExe)
+
+    $needsInstall = $false
+    $installVerb  = 'Installing'
     if (-not $rustdeskExe) {
+        $needsInstall = $true
+    } elseif ($null -eq $installedVersion) {
+        $needsInstall = $true
+        $installVerb  = 'Repairing'
+    } elseif ($null -ne $latestVersion -and $installedVersion -lt $latestVersion) {
+        $needsInstall = $true
+        $installVerb  = 'Updating'
+    }
+
+    if ($needsInstall) {
+        Show-Step 2 4 "$installVerb RustDesk..."
         $installer = Join-Path $env:TEMP 'rustdesk-installer.exe'
-        $rustdeskUrl = Get-RustDeskInstallerUrl
         Write-Verbose "Downloading $rustdeskUrl"
         Invoke-WebRequest -Uri $rustdeskUrl -OutFile $installer -UseBasicParsing
         $proc = Start-Process -FilePath $installer -ArgumentList '--silent-install' -PassThru
-        $waited = 0
-        while (-not (Test-Path "$env:ProgramFiles\RustDesk\rustdesk.exe") -and $waited -lt 180) {
+
+        # An upgrade cannot be detected by "does the exe exist" -- it already does.
+        $waited  = 0
+        $settled = $false
+        while ($waited -lt 180) {
             Start-Sleep -Seconds 2; $waited += 2
+            $currentExe = $rustdeskExePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (-not $currentExe) { continue }
+            if ($null -eq $latestVersion) { $settled = $true; break }
+            $currentVersion = ConvertTo-RdVersion (Get-InstalledRustDeskVersion $currentExe)
+            if ($null -ne $currentVersion -and $currentVersion -ge $latestVersion) { $settled = $true; break }
         }
-        if (-not (Test-Path "$env:ProgramFiles\RustDesk\rustdesk.exe")) {
+        if (-not $settled -and -not ($rustdeskExePaths | Where-Object { Test-Path $_ })) {
             Write-Host "FAILED" -ForegroundColor Red
             Show-Error "Install timed out. You may need to run as Administrator."
             Read-Host "`n  Press Enter to exit"
@@ -96,6 +163,8 @@ try {
         Get-Process -Name 'rustdesk', 'RustDesk' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
         if ($proc -and -not $proc.HasExited) { $proc | Stop-Process -Force -ErrorAction SilentlyContinue }
         $rustdeskExe = $rustdeskExePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+    } else {
+        Show-Step 2 4 "RustDesk already current..."
     }
     Show-StepOk
 
