@@ -226,7 +226,19 @@ Write-Host ""
 
 try {
     # Step 1: Install RustDesk if needed
-    Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue | Stop-Service -Force -ErrorAction SilentlyContinue
+    # sc.exe stop, not Stop-Service: Stop-Service blocks with no timeout and
+    # -ErrorAction cannot rescue it, because a service stuck in StopPending is not
+    # raising an error - it is simply waiting. Same class of hang that froze
+    # "Starting RustDesk service..." on machines where RustDesk was already running.
+    if (Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue) {
+        & sc.exe stop RustDesk 2>&1 | Out-Null
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        while ($sw.Elapsed.TotalSeconds -lt 15) {
+            $s = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+            if (-not $s -or $s.Status -eq 'Stopped') { break }
+            Start-Sleep -Milliseconds 700
+        }
+    }
     Get-Process -Name 'rustdesk', 'RustDesk' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
 
@@ -344,51 +356,94 @@ approve-mode = 'password'
     # when the user's Windows build has unusual restrictions (Defender quarantine, AppLocker,
     # disabled service install, etc.). Reports stay informative even with EAP=Stop.
     Show-Step 3 5 "Starting RustDesk service..."
+    #
+    # ☠ REWRITTEN 2026-08-22 - the previous version HUNG when RustDesk was already
+    #   installed and running. Three separate causes, all fixed here:
+    #
+    #   1. STALE SERVICE HANDLE. It captured $svc once with Get-Service, then polled
+    #      $svc.Refresh() in a loop. An upgrade DELETES and RECREATES the service, so
+    #      that handle refers to a service that no longer exists and its Status never
+    #      changes - the loop can never satisfy its exit condition. Always re-query.
+    #   2. Start-Service / Stop-Service BLOCK WITH NO TIMEOUT. If the SCM leaves the
+    #      service in StartPending (common when the old rustdesk.exe still holds a
+    #      file lock) the cmdlet waits indefinitely and -ErrorAction does not help,
+    #      because it is not an error - it is waiting. sc.exe returns immediately and
+    #      we do the waiting ourselves, bounded.
+    #   3. --install-service was reachable while a service already existed, and it
+    #      blocks when it cannot replace a running one.
+    #
+    #   Everything below is bounded: worst case ~45s, then it reports and moves on
+    #   rather than hanging forever.
+    #
     $stage = "init"
     try {
-        $stage = "Get-Service initial check"
-        $svc = $null
-        try { $svc = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue } catch { Write-Verbose "Initial Get-Service threw: $($_.Exception.Message)" }
-
-        if (-not $svc) {
-            $stage = "rustdesk.exe --install-service"
-            Write-Verbose "RustDesk service not registered. rustdeskExe='$rustdeskExe'. Running --install-service."
-            if (-not $rustdeskExe -or -not (Test-Path $rustdeskExe)) {
-                Show-StepFail "rustdesk.exe path is invalid: '$rustdeskExe'"
-                throw "rustdesk.exe missing"
+        function Get-RdService { Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue }
+        function Wait-RdStatus {
+            param([string]$Want, [int]$TimeoutSec = 20)
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
+                $s = Get-RdService                      # fresh query, never a stale handle
+                if (-not $s) { return $null }
+                if ($s.Status -eq $Want) { return $s }
+                Start-Sleep -Milliseconds 700
             }
-            $installOut = & $rustdeskExe --install-service 2>&1 | Out-String
-            Write-Verbose "--install-service output: $installOut"
-            Start-Sleep -Seconds 3
-            $stage = "Get-Service after --install-service"
-            try { $svc = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue } catch { Write-Verbose "Post-install Get-Service threw: $($_.Exception.Message)" }
+            return (Get-RdService)
         }
 
-        if (-not $svc) {
-            Show-StepFail "Could not register RustDesk service. Output of --install-service: $installOut"
-            throw "Service registration failed"
+        $stage = "Get-Service initial check"
+        $svc = Get-RdService
+
+        # Already running and configured? Nothing to do - do NOT stop/start it.
+        # This is the case that used to hang, and it is also the most common one:
+        # every re-run on a working machine lands here.
+        if ($svc -and $svc.Status -eq 'Running') {
+            Write-Verbose "RustDesk service already Running - leaving it alone."
+            $stage = "Set-Service Automatic (already running)"
+            try { Set-Service -Name 'RustDesk' -StartupType Automatic -ErrorAction SilentlyContinue } catch { }
+            Show-StepOk
         }
+        else {
+            if (-not $svc) {
+                $stage = "rustdesk.exe --install-service"
+                Write-Verbose "RustDesk service not registered. rustdeskExe='$rustdeskExe'. Running --install-service."
+                if (-not $rustdeskExe -or -not (Test-Path $rustdeskExe)) {
+                    Show-StepFail "rustdesk.exe path is invalid: '$rustdeskExe'"
+                    throw "rustdesk.exe missing"
+                }
+                # Bounded: --install-service can block if it cannot replace a running
+                # service, so cap it rather than inheriting an unbounded wait.
+                $p = Start-Process -FilePath $rustdeskExe -ArgumentList '--install-service' -PassThru -WindowStyle Hidden
+                if (-not $p.WaitForExit(30000)) {
+                    Write-Verbose "--install-service did not exit in 30s; killing and continuing."
+                    try { $p.Kill() } catch { }
+                }
+                $svc = Wait-RdStatus -Want 'Stopped' -TimeoutSec 10
+                if (-not $svc) { $svc = Get-RdService }
+            }
 
-        $stage = "Set-Service Automatic"
-        Set-Service -Name 'RustDesk' -StartupType Automatic -ErrorAction SilentlyContinue
+            if (-not $svc) {
+                Show-StepFail "Could not register RustDesk service."
+                throw "Service registration failed"
+            }
 
-        if ($svc.Status -ne 'Running') {
-            $stage = "Start-Service"
-            Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
-        }
+            $stage = "Set-Service Automatic"
+            try { Set-Service -Name 'RustDesk' -StartupType Automatic -ErrorAction SilentlyContinue } catch { }
 
-        $stage = "wait for Running state"
-        Start-Sleep -Seconds 4
-        $svc.Refresh()
-        $tries = 0
-        while ($svc.Status -ne 'Running' -and $tries -lt 6) { Start-Sleep -Seconds 2; $svc.Refresh(); $tries++ }
+            # ☠ sc.exe, not Start-Service: sc returns immediately and we control the wait.
+            $stage = "sc.exe start"
+            & sc.exe start RustDesk 2>&1 | Out-Null
 
-        if ($svc.Status -ne 'Running') {
-            Show-StepFail "Service registered but didn't start (status: $($svc.Status))"
-            throw "Service not running"
+            $stage = "wait for Running state"
+            $svc = Wait-RdStatus -Want 'Running' -TimeoutSec 25
+
+            if (-not $svc -or $svc.Status -ne 'Running') {
+                $st = if ($svc) { $svc.Status } else { 'not found' }
+                Show-StepFail "Service registered but didn't start (status: $st)"
+                throw "Service not running"
+            }
+            Show-StepOk
         }
     } catch {
-        # Add stage context to whatever bubbled up
         if ($_.Exception.Message -notmatch 'rustdesk\.exe missing|Service registration failed|Service not running') {
             Show-StepFail "stage=[$stage] $($_.Exception.Message)"
         }
@@ -432,9 +487,12 @@ if (-not $svc) {
     & $rdExe --install-service
     Start-Sleep -Seconds 3
     Set-Service -Name 'RustDesk' -StartupType Automatic -ErrorAction SilentlyContinue
-    Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+    & sc.exe start RustDesk 2>&1 | Out-Null
 } elseif ($svc.Status -ne 'Running') {
-    Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+    # sc.exe, not Start-Service: this runs unattended on a schedule, and a
+    # blocking start would leave the watchdog itself hung - silently disabling
+    # the auto-recovery it exists to provide.
+    & sc.exe start RustDesk 2>&1 | Out-Null
 }
 '@
         Set-Content -Path $watchdogPath -Value $watchdogScript -Encoding ASCII -Force
@@ -484,10 +542,22 @@ if (-not $svc) {
         Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue -Verbose:$false
     }
 
-    # Restart service so it picks up the password
-    Stop-Service -Name 'RustDesk' -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 2
-    Start-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+    # Restart service so it picks up the password.
+    # sc.exe + bounded poll - Stop-Service/Start-Service block with no timeout.
+    & sc.exe stop RustDesk 2>&1 | Out-Null
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt 15) {
+        $s = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+        if (-not $s -or $s.Status -eq 'Stopped') { break }
+        Start-Sleep -Milliseconds 700
+    }
+    & sc.exe start RustDesk 2>&1 | Out-Null
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt 20) {
+        $s = Get-Service -Name 'RustDesk' -ErrorAction SilentlyContinue
+        if ($s -and $s.Status -eq 'Running') { break }
+        Start-Sleep -Milliseconds 700
+    }
     Start-Sleep -Seconds 6   # service needs time to receive IPC + write the toml back
 
     # Verify the password landed somewhere -- check ALL plausible config locations,
