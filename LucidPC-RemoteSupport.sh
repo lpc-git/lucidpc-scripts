@@ -107,7 +107,6 @@ serial = 0
 
 [options]
 relay-server = '$RELAY_SERVER'
-allow-websocket = 'Y'
 api-server = '$API_SERVER'
 custom-rendezvous-server = '$ID_SERVER'
 key = '$PUBLIC_KEY'
