@@ -23,6 +23,15 @@ param(
     [switch]$GeneratePassword,
     [switch]$ForcePassword,
     [switch]$SkipPassword,
+    # Re-run this installer on a machine you are REMOTELY CONNECTED TO.
+    # Inline it cannot work: restarting the RustDesk service kills the session
+    # running the installer, so it dies half-done. -Detached schedules the run as
+    # SYSTEM and returns, so you disconnect and it finishes without you.
+    [switch]$Detached,
+    [int]$DetachDelaySeconds = 60,
+    # Set automatically by -Detached. Suppresses every prompt, because a
+    # scheduled task has no console and would wait forever for a keypress.
+    [switch]$NonInteractive,
     [int]$GeneratedLength = 20,
     # Optional override. When empty (the default), the installer URL is resolved
     # from the GitHub releases API at run time (with a pinned fallback).
@@ -30,6 +39,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# A scheduled task runs with no console: [Environment]::UserInteractive is False
+# there. Any ReadKey/Read-Host would block forever, so every prompt is gated.
+$script:CanPrompt = (-not $NonInteractive) -and [Environment]::UserInteractive
 $VerbosePreference = if ($VerbosePreference -eq 'SilentlyContinue') { 'SilentlyContinue' } else { $VerbosePreference }
 
 # PowerShell 7.4+ default: throws NativeCommandException when a native command exits
@@ -150,19 +163,66 @@ function ConvertTo-RdVersion {
 
 # Self-elevate to admin if needed. UAC prompt appears, user clicks Yes once,
 # the elevated copy runs in a new window with the original parameters forwarded.
+
+# --- detached mode: survive the RustDesk session that launched us -------------
+# ☠ The installer restarts the RustDesk service. Run inline over a RustDesk
+#   session and it kills that session mid-install, leaving the machine
+#   half-configured - which is exactly how a config change "does not stick".
+#   Here we copy ourselves somewhere stable, hand the job to the task scheduler
+#   as SYSTEM, and return so the operator can disconnect.
+function Invoke-Detach {
+    # A path with NO SPACES: schtasks /TR quoting is doubled inside cmd.exe and
+    # a quoted inner path is where this silently fails.
+    $persist = 'C:\ProgramData\LucidPC-ServerInstall.ps1'
+    if ($PSCommandPath) {
+        Copy-Item -LiteralPath $PSCommandPath -Destination $persist -Force
+    } else {
+        Show-Error "Cannot detach: run via the bootstrap one-liner or from a saved .ps1 file."
+        exit 1
+    }
+    $when = (Get-Date).AddSeconds($DetachDelaySeconds)
+    $task = 'LucidPC-ServerInstall-Detached'
+    $run  = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $persist -SkipPassword -NonInteractive"
+
+    # ☠ /SD is REQUIRED. /SC ONCE with only /ST assumes TODAY, so a delay that
+    #   crosses midnight schedules the task in the past and it never fires.
+    #   /SD must use the CURRENT CULTURE's short-date pattern - schtasks parses
+    #   it by locale, so a hardcoded MM/dd/yyyy breaks outside en-US.
+    $sd = $when.ToString((Get-Culture).DateTimeFormat.ShortDatePattern)
+    $st = $when.ToString('HH:mm')
+    cmd.exe /c "schtasks /Delete /TN ""$task"" /F >nul 2>&1" | Out-Null
+    cmd.exe /c "schtasks /Create /TN ""$task"" /TR ""$run"" /SC ONCE /SD $sd /ST $st /RU SYSTEM /RL HIGHEST /F >nul 2>&1" | Out-Null
+    cmd.exe /c "schtasks /Query /TN ""$task"" >nul 2>&1" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Show-Error "Could not create the scheduled task - run without -Detached at the console instead."
+        exit 1
+    }
+
+    Write-Host ""
+    Write-Host "  Scheduled to run as SYSTEM at $sd $st (in ~$DetachDelaySeconds s)." -ForegroundColor Cyan
+    Write-Host "  DISCONNECT NOW - the RustDesk service will restart and your session will drop." -ForegroundColor Yellow
+    Write-Host "  The machine reconfigures itself and reconnects on its own." -ForegroundColor Gray
+    Write-Host ""
+    exit 0
+}
+
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
     if (-not $PSCommandPath) {
         # Running via iex / piped -- no script file to re-launch. Bootstrap should be used instead.
         Show-Error "Run via the bootstrap one-liner so it can self-elevate, or save the script to a file first."
         Write-Host "  Bootstrap: iex (irm https://raw.githubusercontent.com/lpc-git/lucidpc-scripts/main/bootstrap-server.ps1)" -ForegroundColor DarkGray
-        Read-Host "`nPress Enter to exit"
+        if ($script:CanPrompt) { Read-Host "`nPress Enter to exit" }
         exit 1
     }
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
     if ($GeneratePassword.IsPresent)            { $argList += '-GeneratePassword' }
     if ($ForcePassword.IsPresent)               { $argList += '-ForcePassword' }
     if ($SkipPassword.IsPresent)                { $argList += '-SkipPassword' }
+    # ☠ Must be forwarded: without it the ELEVATED copy runs inline and kills
+    #   the RustDesk session that launched it, half-way through the install.
+    if ($Detached.IsPresent)                    { $argList += '-Detached' }
+    if ($NonInteractive.IsPresent)              { $argList += '-NonInteractive' }
     if (-not [string]::IsNullOrEmpty($PermanentPassword)) {
         $argList += '-PermanentPassword'; $argList += "`"$PermanentPassword`""
     }
@@ -171,6 +231,10 @@ if (-not $isAdmin) {
     Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -Verb RunAs
     exit 0
 }
+
+# Now elevated. If asked to detach, hand the job to the scheduler and get out
+# before anything touches the RustDesk service.
+if ($Detached) { Invoke-Detach }
 
 # --- Decide whether the password step is even needed ---
 # Skip the password prompt entirely if:
@@ -672,11 +736,15 @@ if (-not $svc) {
     Show-Error $_.Exception.Message
     Write-Verbose $_.ScriptStackTrace
     Write-Host ""
-    Write-Host "  Press any key to exit..." -NoNewline -ForegroundColor DarkGray
-    $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+    if ($script:CanPrompt) {
+        Write-Host "  Press any key to exit..." -NoNewline -ForegroundColor DarkGray
+        $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+    }
     exit 1
 }
 
-Write-Host "  Press any key to close..." -NoNewline -ForegroundColor DarkGray
-$null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+if ($script:CanPrompt) {
+    Write-Host "  Press any key to close..." -NoNewline -ForegroundColor DarkGray
+    $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+}
 exit 0

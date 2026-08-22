@@ -76,13 +76,18 @@ if ($Detached) {
     $task = 'LucidPC-SetWebSocket'
     $cmd  = "powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File `"$self`" $flag"
 
+    # ☠ /SD is REQUIRED. /SC ONCE with only /ST assumes TODAY, so a delay that
+    #   crosses midnight schedules the task in the past and it never fires.
+    #   /SD must use the CURRENT CULTURE's short-date pattern - schtasks parses
+    #   it by locale, so a hardcoded MM/dd/yyyy breaks outside en-US.
     cmd.exe /c "schtasks /Delete /TN ""$task"" /F >nul 2>&1" | Out-Null
+    $sd = $when.ToString((Get-Culture).DateTimeFormat.ShortDatePattern)
     $st = $when.ToString('HH:mm')
-    cmd.exe /c "schtasks /Create /TN ""$task"" /TR ""$cmd"" /SC ONCE /ST $st /RU SYSTEM /RL HIGHEST /F" | Out-Null
+    cmd.exe /c "schtasks /Create /TN ""$task"" /TR ""$cmd"" /SC ONCE /SD $sd /ST $st /RU SYSTEM /RL HIGHEST /F" | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "schtasks /Create failed with exit $LASTEXITCODE" }
 
     Write-Host ""
-    Write-Host "  Scheduled: transport -> $(if($On){'WebSocket'}else{'native'}) at $st (in ~$DelaySeconds s)." -ForegroundColor Cyan
+    Write-Host "  Scheduled: transport -> $(if($On){'WebSocket'}else{'native'}) at $sd $st (in ~$DelaySeconds s)." -ForegroundColor Cyan
     Write-Host "  DISCONNECT NOW. The RustDesk service will restart and your session will drop." -ForegroundColor Yellow
     Write-Host "  The machine reconnects on the new transport by itself." -ForegroundColor Gray
     Write-Host ""
