@@ -192,6 +192,10 @@ if (-not $skipPasswordStep) {
         if ($pwAlreadySet -and $ForcePassword) {
             Write-Host "  Permanent password is already set; -ForcePassword passed, re-prompting." -ForegroundColor DarkGray
         } else {
+            Write-Host "  This step is for LucidPC technicians." -ForegroundColor Yellow
+            Write-Host "  If you are a client and are seeing this screen, you do not need a" -ForegroundColor DarkGray
+            Write-Host "  password - close this window and call LucidPC on (212) 784-6219." -ForegroundColor DarkGray
+            Write-Host ""
             Write-Host "  Paste the LucidPC support password (input is hidden)." -ForegroundColor DarkGray
         }
         Write-Host ""
