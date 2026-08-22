@@ -44,7 +44,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
  "  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12;" ^
  "  $cfgDir = Join-Path $env:APPDATA 'RustDesk\config';" ^
  "  New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null;" ^
- "  $toml = \"rendezvous_server = 'live.lucidpc.com:21116'`nnat_type = 1`nserial = 0`n`n[options]`nrelay-server = 'live.lucidpc.com'`napi-server = 'https://live.lucidpc.com'`ncustom-rendezvous-server = 'live.lucidpc.com'`nkey = 'hRakm22D+ZsyQUwQ5nf3tRAPAlbb39LYEQAP0UDet9k='`napprove-mode = 'password'`n\";" ^
+ "  $toml = \"rendezvous_server = 'live.lucidpc.com:21116'`nnat_type = 1`nserial = 0`n`n[options]`nrelay-server = 'live.lucidpc.com'`napi-server = 'https://live.lucidpc.com'`ncustom-rendezvous-server = 'live.lucidpc.com'`nkey = 'hRakm22D+ZsyQUwQ5nf3tRAPAlbb39LYEQAP0UDet9k='`nallow-websocket = 'Y'`napprove-mode = 'password'`n\";" ^
  "  [IO.File]::WriteAllText((Join-Path $cfgDir 'RustDesk2.toml'), $toml, (New-Object Text.UTF8Encoding($false)));" ^
  "  $dir = Join-Path $env:TEMP 'LucidPC-QuickConnect';" ^
  "  New-Item -ItemType Directory -Force -Path $dir | Out-Null;" ^

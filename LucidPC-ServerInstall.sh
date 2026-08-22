@@ -24,6 +24,16 @@ ID_SERVER="live.lucidpc.com"
 RELAY_SERVER="live.lucidpc.com"
 API_SERVER="https://live.lucidpc.com"
 PUBLIC_KEY="hRakm22D+ZsyQUwQ5nf3tRAPAlbb39LYEQAP0UDet9k="
+# ☠ WEBSOCKET MODE IS ALL-OR-NOTHING ACROSS THE FLEET.
+#   A WebSocket peer and a native TCP/UDP peer CANNOT connect to each other -
+#   BetterDesk refuses the relay ("WebSocket Mode and native TCP/UDP cannot
+#   share a relay session", upstream #290). A machine installed with this "Y"
+#   while your workstation is still native is UNREACHABLE, and vice versa.
+#   Flip this to "N" only if the whole fleet is native.
+#   Why it is on: it works through any client firewall that permits 443, and it
+#   costs nothing here because the admin workstation is behind symmetric NAT,
+#   so every session already relays and P2P was never available.
+USE_WEBSOCKET="Y"
 RUSTDESK_VERSION="1.4.6"
 # -------------------------------------------------------
 
@@ -137,6 +147,7 @@ relay-server = '$RELAY_SERVER'
 api-server = '$API_SERVER'
 custom-rendezvous-server = '$ID_SERVER'
 key = '$PUBLIC_KEY'
+allow-websocket = '$USE_WEBSOCKET'
 approve-mode = 'password'
 verification-method = 'use-permanent-password'
 EOF

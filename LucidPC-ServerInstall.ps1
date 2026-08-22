@@ -47,6 +47,16 @@ $idServer    = 'live.lucidpc.com'
 $relayServer = 'live.lucidpc.com'
 $apiServer   = 'https://live.lucidpc.com'
 $publicKey   = 'hRakm22D+ZsyQUwQ5nf3tRAPAlbb39LYEQAP0UDet9k='
+# ☠ WEBSOCKET MODE IS ALL-OR-NOTHING ACROSS THE FLEET.
+#   A WebSocket peer and a native TCP/UDP peer CANNOT connect to each other -
+#   BetterDesk refuses the relay ("WebSocket Mode and native TCP/UDP cannot
+#   share a relay session", upstream #290). A machine installed with this 'Y'
+#   while your workstation is still native is UNREACHABLE, and vice versa.
+#   Flip this to 'N' only if the whole fleet is native.
+#   Why it is on: it works through any client firewall that permits 443, and it
+#   costs nothing here because the admin workstation is behind symmetric NAT,
+#   so every session already relays and P2P was never available.
+$useWebSocket = 'Y'
 # Fallback installer if the GitHub API can't be reached. Full-version URLs stay
 # downloadable forever; only the version goes stale. Never use a
 # releases/latest/download/ URL with a versioned filename -- it 404s as soon as
@@ -325,6 +335,7 @@ relay-server = '$relayServer'
 api-server = '$apiServer'
 custom-rendezvous-server = '$idServer'
 key = '$publicKey'
+allow-websocket = '$useWebSocket'
 approve-mode = 'password'
 "@
     # verification-method is written ONLY when a permanent password exists or is
