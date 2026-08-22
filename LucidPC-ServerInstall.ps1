@@ -315,8 +315,18 @@ api-server = '$apiServer'
 custom-rendezvous-server = '$idServer'
 key = '$publicKey'
 approve-mode = 'password'
-verification-method = 'use-permanent-password'
 "@
+    # verification-method is written ONLY when a permanent password exists or is
+    # being set in this run. Quick-connect (-SkipPassword on a fresh machine) must
+    # leave the key ABSENT so RustDesk's default applies and the AUTO-GENERATED
+    # password shown on screen works -- the client reads LucidPC the ID and that
+    # password, LucidPC connects, then sets the permanent one over the session.
+    # With 'use-permanent-password' forced and no password ever set, the device
+    # rejects the generated password and NOBODY can connect, which is exactly the
+    # trap the first version of LucidPC-Connect.bat shipped with.
+    if ($pwAlreadySet -or -not $skipPasswordStep) {
+        $configToml += "`nverification-method = 'use-permanent-password'"
+    }
     $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
     foreach ($cfgDir in @(
         (Join-Path $env:APPDATA 'RustDesk\config'),
@@ -445,7 +455,7 @@ if (-not $svc) {
 
     # Step 4: Set permanent password as SYSTEM (one-shot scheduled task) -- skipped on re-run
     if ($skipPasswordStep) {
-        Show-Step 4 5 "Permanent password (already set, skipping)..."
+        Show-Step 4 5 "Permanent password (skipped here - set by LucidPC over the session)..."
         Show-StepOk
     } else {
     Show-Step 4 5 "Setting permanent password..."
